@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+pydantic
+pandas
+polars
+openpyxl
+httpx
+gcsfs
+sqlalchemy
+psycopg2-binary
+google-cloud-storage
+python-multipart
+pytest

@@ -1,0 +1,47 @@
+# Git / IDE
+.git
+.gitignore
+.cursor
+.vscode
+.idea
+*.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+
+# Secrets (Cloud Run inyecta env vars en runtime)
+.env
+.env.*
+
+# Artefactos locales / pruebas
+outputs/
+*.log
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# Scripts de desarrollo offline
+test_engine.py
+create_test_data.py
+
+# Datos de prueba locales (no requeridos en producción)
+data/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini

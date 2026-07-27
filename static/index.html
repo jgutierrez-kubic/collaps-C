@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Condenser CORE — Control Remoto</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: { 500: "#6366f1", 600: "#4f46e5", 700: "#4338ca" },
+          },
+        },
+      },
+    };
+  </script>
+</head>
+<body class="min-h-screen bg-slate-950 text-slate-100 antialiased">
+  <div class="pointer-events-none fixed inset-0 overflow-hidden">
+    <div class="absolute -top-40 -right-40 h-96 w-96 rounded-full bg-indigo-600/20 blur-3xl"></div>
+    <div class="absolute -bottom-40 -left-40 h-96 w-96 rounded-full bg-violet-600/10 blur-3xl"></div>
+  </div>
+
+  <div class="relative mx-auto max-w-7xl px-4 py-10 sm:px-6 lg:px-8">
+    <header class="mb-10 text-center">
+      <p class="text-sm font-semibold uppercase tracking-widest text-indigo-400">Collpaps BIM-OS</p>
+      <h1 class="mt-2 text-4xl font-bold tracking-tight text-white">Condenser CORE</h1>
+      <p class="mt-3 text-slate-400">Interfaz de control remoto — emisión de jobs BTTF</p>
+    </header>
+
+    <form id="condenser-form" class="space-y-8">
+      <div class="grid gap-6 lg:grid-cols-2">
+        <!-- Fuente A -->
+        <section class="rounded-2xl border border-slate-800 bg-slate-900/70 p-6 shadow-xl backdrop-blur">
+          <div class="mb-5 flex items-center gap-3">
+            <span class="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-600/20 text-indigo-300 font-bold">A</span>
+            <div>
+              <h2 class="text-lg font-semibold text-white">Fuente A — Contrato</h2>
+              <p class="text-sm text-slate-400">Origen del dataset izquierdo</p>
+            </div>
+          </div>
+
+          <label class="mb-2 block text-sm font-medium text-slate-300" for="source-a-type">Tipo de fuente</label>
+          <select id="source-a-type" class="mb-4 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40">
+            <option value="database">Database (SQL)</option>
+            <option value="file">Archivo (local / GCS)</option>
+          </select>
+
+          <div id="source-a-query-wrap">
+            <label class="mb-2 block text-sm font-medium text-slate-300" for="source-a-query">Query SQL</label>
+            <textarea id="source-a-query" rows="4" placeholder="SELECT id, codigo_partida, cantidad_contrato FROM contrato.itemizado"
+              class="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 font-mono text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"></textarea>
+          </div>
+
+          <div id="source-a-path-wrap" class="hidden">
+            <label class="mb-2 block text-sm font-medium text-slate-300" for="source-a-path">Path del archivo</label>
+            <input id="source-a-path" type="text" placeholder="data/contrato.csv o gs://bucket/proyecto/contrato.xlsx"
+              class="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40" />
+          </div>
+        </section>
+
+        <!-- Fuente B -->
+        <section class="rounded-2xl border border-slate-800 bg-slate-900/70 p-6 shadow-xl backdrop-blur">
+          <div class="mb-5 flex items-center gap-3">
+            <span class="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-600/20 text-violet-300 font-bold">B</span>
+            <div>
+              <h2 class="text-lg font-semibold text-white">Fuente B — Modelo</h2>
+              <p class="text-sm text-slate-400">Origen del dataset derecho</p>
+            </div>
+          </div>
+
+          <label class="mb-2 block text-sm font-medium text-slate-300" for="source-b-type">Tipo de fuente</label>
+          <select id="source-b-type" class="mb-4 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40">
+            <option value="database">Database (SQL)</option>
+            <option value="file">Archivo (local / GCS)</option>
+          </select>
+
+          <div id="source-b-query-wrap">
+            <label class="mb-2 block text-sm font-medium text-slate-300" for="source-b-query">Query SQL</label>
+            <textarea id="source-b-query" rows="4" placeholder="SELECT id, codigo_partida, cantidad_modelo FROM modelo.itemizado"
+              class="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 font-mono text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"></textarea>
+          </div>
+
+          <div id="source-b-path-wrap" class="hidden">
+            <label class="mb-2 block text-sm font-medium text-slate-300" for="source-b-path">Path del archivo</label>
+            <input id="source-b-path" type="text" placeholder="data/modelo.csv o gs://bucket/proyecto/modelo.xlsx"
+              class="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40" />
+          </div>
+        </section>
+      </div>
+
+      <!-- Configuración -->
+      <section class="rounded-2xl border border-slate-800 bg-slate-900/70 p-6 shadow-xl backdrop-blur">
+        <h2 class="mb-1 text-lg font-semibold text-white">Configuración BTTF</h2>
+        <p class="mb-6 text-sm text-slate-400">Join keys y reglas dinámicas Mr. Fusion</p>
+
+        <div class="mb-8">
+          <label class="mb-2 block text-sm font-medium text-slate-300" for="join-keys">Join Keys (separadas por coma)</label>
+          <input id="join-keys" type="text" value="id"
+            class="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40" />
+        </div>
+
+        <div>
+          <div class="mb-3 flex items-center justify-between">
+            <h3 class="text-sm font-semibold uppercase tracking-wide text-slate-300">Reglas Mr. Fusion</h3>
+            <button type="button" id="add-rule-btn"
+              class="rounded-lg border border-indigo-500/40 bg-indigo-600/10 px-3 py-1.5 text-xs font-semibold text-indigo-300 transition hover:bg-indigo-600/20">
+              + Añadir regla
+            </button>
+          </div>
+          <div id="rules-container" class="space-y-3"></div>
+        </div>
+      </section>
+
+      <div class="flex justify-center pt-2">
+        <button type="submit" id="submit-btn"
+          class="inline-flex min-w-[260px] items-center justify-center gap-2 rounded-xl bg-indigo-600 px-8 py-4 text-lg font-semibold text-white shadow-lg shadow-indigo-900/40 transition hover:bg-indigo-500 focus:outline-none focus:ring-4 focus:ring-indigo-500/40 disabled:cursor-not-allowed disabled:opacity-60">
+          <span id="submit-label">Ejecutar Análisis</span>
+          <svg id="submit-spinner" class="hidden h-5 w-5 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+          </svg>
+        </button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Modal éxito -->
+  <div id="success-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-slate-950/70 px-4 backdrop-blur-sm">
+    <div class="w-full max-w-md rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl">
+      <div class="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-emerald-500/20 text-emerald-400">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+        </svg>
+      </div>
+      <h3 class="text-xl font-bold text-white">Job encolado exitosamente</h3>
+      <p class="mt-2 text-sm text-slate-400">El motor Condenser procesará el análisis en segundo plano.</p>
+      <div class="mt-4 rounded-lg border border-slate-700 bg-slate-800 p-3">
+        <p class="text-xs uppercase tracking-wide text-slate-500">job_id</p>
+        <p id="modal-job-id" class="mt-1 break-all font-mono text-sm text-indigo-300"></p>
+      </div>
+      <button type="button" id="close-modal-btn"
+        class="mt-6 w-full rounded-lg bg-indigo-600 py-2.5 text-sm font-semibold text-white transition hover:bg-indigo-500">
+        Cerrar
+      </button>
+    </div>
+  </div>
+
+  <!-- Modal error -->
+  <div id="error-modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-slate-950/70 px-4 backdrop-blur-sm">
+    <div class="w-full max-w-md rounded-2xl border border-red-900/50 bg-slate-900 p-6 shadow-2xl">
+      <h3 class="text-xl font-bold text-red-400">Error al encolar el job</h3>
+      <p id="error-message" class="mt-3 text-sm text-slate-300"></p>
+      <button type="button" id="close-error-btn"
+        class="mt-6 w-full rounded-lg border border-slate-600 py-2.5 text-sm font-semibold text-slate-200 transition hover:bg-slate-800">
+        Cerrar
+      </button>
+    </div>
+  </div>
+
+  <script>
+    const API_URL = "/api/v1/condenser/job";
+
+    function setupSourceToggle(typeSelectId, queryWrapId, pathWrapId) {
+      const typeSelect = document.getElementById(typeSelectId);
+      const queryWrap = document.getElementById(queryWrapId);
+      const pathWrap = document.getElementById(pathWrapId);
+
+      function updateVisibility() {
+        const isDatabase = typeSelect.value === "database";
+        queryWrap.classList.toggle("hidden", !isDatabase);
+        pathWrap.classList.toggle("hidden", isDatabase);
+      }
+
+      typeSelect.addEventListener("change", updateVisibility);
+      updateVisibility();
+    }
+
+    function buildDataSource(prefix) {
+      const uiType = document.getElementById(`${prefix}-type`).value;
+
+      if (uiType === "database") {
+        return {
+          type: "database",
+          query: document.getElementById(`${prefix}-query`).value.trim(),
+        };
+      }
+
+      const path = document.getElementById(`${prefix}-path`).value.trim();
+      const type = path.startsWith("gs://") ? "gcs" : "local";
+      return { type, path };
+    }
+
+    function collectRules() {
+      const rows = document.querySelectorAll(".fusion-rule-row");
+      const rules = [];
+
+      rows.forEach((row) => {
+        const target = row.querySelector(".rule-target").value.trim();
+        const expression = row.querySelector(".rule-expression").value.trim();
+        if (target && expression) {
+          rules.push({ target_column: target, expression });
+        }
+      });
+
+      return rules;
+    }
+
+    function addRuleRow(target = "", expression = "") {
+      const container = document.getElementById("rules-container");
+      const row = document.createElement("div");
+      row.className = "fusion-rule-row grid gap-3 rounded-lg border border-slate-700 bg-slate-800/60 p-3 sm:grid-cols-[1fr_2fr_auto]";
+
+      row.innerHTML = `
+        <input type="text" placeholder="target_column" value="${target}"
+          class="rule-target rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 text-sm focus:border-indigo-500 focus:outline-none" />
+        <input type="text" placeholder="expression (ej. cantidad_modelo - cantidad_contrato)" value="${expression}"
+          class="rule-expression rounded-lg border border-slate-600 bg-slate-900 px-3 py-2 font-mono text-sm focus:border-indigo-500 focus:outline-none" />
+        <button type="button" class="remove-rule-btn rounded-lg border border-red-500/30 px-3 py-2 text-xs font-semibold text-red-300 hover:bg-red-500/10">
+          Eliminar
+        </button>
+      `;
+
+      row.querySelector(".remove-rule-btn").addEventListener("click", () => row.remove());
+      container.appendChild(row);
+    }
+
+    function buildJobPayload() {
+      const joinKeys = document.getElementById("join-keys").value
+        .split(",")
+        .map((k) => k.trim())
+        .filter(Boolean);
+
+      return {
+        module_00_on: {
+          business_domain: "bim",
+          execution_mode: "async",
+          persistence: { target: "local" },
+          routing_tags: ["ui-control"],
+          notify_route: "https://httpbin.org/post",
+        },
+        module_01_roads: {
+          source_a: buildDataSource("source-a"),
+          source_b: buildDataSource("source-b"),
+        },
+        module_02_trains: {
+          stack_required: false,
+        },
+        module_03_condenser: {
+          join_keys: joinKeys,
+        },
+        module_mr_fusion: {
+          rules: collectRules(),
+        },
+      };
+    }
+
+    function showModal(modalId) {
+      const modal = document.getElementById(modalId);
+      modal.classList.remove("hidden");
+      modal.classList.add("flex");
+    }
+
+    function hideModal(modalId) {
+      const modal = document.getElementById(modalId);
+      modal.classList.add("hidden");
+      modal.classList.remove("flex");
+    }
+
+    function setLoading(isLoading) {
+      const btn = document.getElementById("submit-btn");
+      const label = document.getElementById("submit-label");
+      const spinner = document.getElementById("submit-spinner");
+      btn.disabled = isLoading;
+      label.textContent = isLoading ? "Encolando..." : "Ejecutar Análisis";
+      spinner.classList.toggle("hidden", !isLoading);
+    }
+
+    setupSourceToggle("source-a-type", "source-a-query-wrap", "source-a-path-wrap");
+    setupSourceToggle("source-b-type", "source-b-query-wrap", "source-b-path-wrap");
+
+    document.getElementById("add-rule-btn").addEventListener("click", () => {
+      addRuleRow();
+    });
+
+    document.getElementById("close-modal-btn").addEventListener("click", () => hideModal("success-modal"));
+    document.getElementById("close-error-btn").addEventListener("click", () => hideModal("error-modal"));
+
+    addRuleRow("delta_cantidad", "cantidad_modelo - cantidad_contrato");
+
+    document.getElementById("source-a-type").value = "file";
+    document.getElementById("source-a-path").value = "data/contrato.csv";
+    document.getElementById("source-b-type").value = "file";
+    document.getElementById("source-b-path").value = "data/modelo.csv";
+    document.getElementById("source-a-type").dispatchEvent(new Event("change"));
+    document.getElementById("source-b-type").dispatchEvent(new Event("change"));
+
+    document.getElementById("condenser-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      setLoading(true);
+
+      const payload = buildJobPayload();
+
+      try {
+        const response = await fetch(API_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          const detail = data.detail ? JSON.stringify(data.detail) : response.statusText;
+          throw new Error(detail || "Error desconocido");
+        }
+
+        document.getElementById("modal-job-id").textContent = data.job_id;
+        showModal("success-modal");
+      } catch (error) {
+        document.getElementById("error-message").textContent = error.message;
+        showModal("error-modal");
+      } finally {
+        setLoading(false);
+      }
+    });
+  </script>
+</body>
+</html>
