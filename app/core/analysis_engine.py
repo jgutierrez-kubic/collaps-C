@@ -218,137 +218,6 @@ class AnalysisEngine:
                 conn.execute(text(ddl))
 
     @staticmethod
-    def _add_directus_primary_key(engine, schema_name: str, table_name: str) -> None:
-        ddl = (
-            f'ALTER TABLE "{schema_name}"."{table_name}" '
-            "ADD COLUMN IF NOT EXISTS id SERIAL PRIMARY KEY"
-        )
-        try:
-            with engine.begin() as conn:
-                conn.execute(text(ddl))
-            logger.info(
-                "Columna id SERIAL PRIMARY KEY verificada/añadida — %s.%s",
-                schema_name,
-                table_name,
-            )
-        except Exception as exc:
-            logger.warning(
-                "No se pudo añadir id PRIMARY KEY en %s.%s: %s",
-                schema_name,
-                table_name,
-                exc,
-            )
-
-    @staticmethod
-    def _fetch_directus_credentials(
-        engine,
-        schema_name: str,
-    ) -> tuple[str, str] | None:
-        query = text(
-            'SELECT directus_url, "Instance_Token" '
-            'FROM public.portal_projects '
-            'WHERE "Schema_Name" = :schema_name'
-        )
-        try:
-            with engine.connect() as conn:
-                row = conn.execute(query, {"schema_name": schema_name}).mappings().first()
-        except Exception as exc:
-            logger.warning(
-                "Error consultando portal_projects para schema=%s: %s",
-                schema_name,
-                exc,
-            )
-            return None
-
-        if row is None:
-            logger.info(
-                "Credenciales de Directus no encontradas en portal_projects para el esquema %s. "
-                "Omitiendo auto-registro.",
-                schema_name,
-            )
-            return None
-
-        directus_url = str(row.get("directus_url") or "").strip()
-        instance_token = str(row.get("Instance_Token") or "").strip()
-
-        if not directus_url or not instance_token:
-            logger.info(
-                "Credenciales de Directus no encontradas en portal_projects para el esquema %s. "
-                "Omitiendo auto-registro.",
-                schema_name,
-            )
-            return None
-
-        return directus_url, instance_token
-
-    @staticmethod
-    def _is_directus_collection_exists_error(exc: httpx.HTTPStatusError) -> bool:
-        if exc.response.status_code != 400:
-            return False
-
-        try:
-            payload = exc.response.json()
-        except Exception:
-            payload = None
-
-        if isinstance(payload, dict):
-            errors = payload.get("errors")
-            if isinstance(errors, list):
-                for error in errors:
-                    if not isinstance(error, dict):
-                        continue
-                    extensions = error.get("extensions")
-                    if isinstance(extensions, dict) and extensions.get("code") == "INVALID_PAYLOAD":
-                        return True
-                    message = str(error.get("message", "")).lower()
-                    if "already exists" in message:
-                        return True
-
-            if payload.get("code") == "INVALID_PAYLOAD":
-                return True
-
-        response_text = exc.response.text.lower()
-        return "already exists" in response_text or "invalid_payload" in response_text
-
-    @staticmethod
-    def _register_directus_collection(schema_name: str, table_name: str) -> None:
-        if not DB_URL:
-            return
-
-        engine = get_db_engine()
-        credentials = AnalysisEngine._fetch_directus_credentials(engine, schema_name)
-        if credentials is None:
-            return
-
-        directus_url, instance_token = credentials
-        clean_collection_name = table_name.split(".")[-1]
-        endpoint = f"{directus_url.rstrip('/')}/collections"
-        headers = {"Authorization": f"Bearer {instance_token}"}
-        body = {"collection": clean_collection_name}
-
-        try:
-            with httpx.Client(timeout=30.0) as client:
-                response = client.post(endpoint, headers=headers, json=body)
-                response.raise_for_status()
-            logger.info("Tabla registrada en Directus — collection=%s", clean_collection_name)
-        except httpx.HTTPStatusError as exc:
-            if AnalysisEngine._is_directus_collection_exists_error(exc):
-                logger.info(
-                    "La colección '%s' ya está registrada en Directus. Omitiendo creación.",
-                    clean_collection_name,
-                )
-                return
-
-            logger.warning(
-                "Autoregistro Directus respondió HTTP %s para %s: %s",
-                exc.response.status_code,
-                clean_collection_name,
-                exc.response.text,
-            )
-        except Exception as exc:
-            logger.warning("Autoregistro Directus falló para %s: %s", clean_collection_name, exc)
-
-    @staticmethod
     def _stamp_run_metadata(
         df_result: pd.DataFrame,
         run_id: int,
@@ -745,6 +614,7 @@ class AnalysisEngine:
             "status": status,
             "analysisId": self.payload.analysis_id,
             "schema": self.payload.schema_name,
+            "targetTable": self.payload.target_table,
         }
         if self._job_id:
             body["jobId"] = self._job_id
@@ -785,7 +655,7 @@ class AnalysisEngine:
             source_stats = self._fetch_source_uniqueness_stats()
             log_join_uniqueness_warning(self.payload, source_stats)
 
-            result, persisted = self._process_analysis_in_chunks(
+            result, _persisted = self._process_analysis_in_chunks(
                 sql,
                 source_stats,
                 created_at=created_at,
@@ -800,12 +670,6 @@ class AnalysisEngine:
                     source_stats["unique_a"] if source_stats else "N/A",
                     source_stats["unique_b"] if source_stats else "N/A",
                 )
-
-            if persisted:
-                schema_name, table_name = persisted
-                engine = get_db_engine()
-                self._add_directus_primary_key(engine, schema_name, table_name)
-                self._register_directus_collection(schema_name, table_name)
 
             self._send_callback("success")
 
