@@ -34,8 +34,8 @@ def log_join_uniqueness_warning(
     """
     base_msg = (
         "FULL OUTER JOIN entre "
-        f"{payload.schema_name}.{payload.tabla_a} y {payload.schema_name}.{payload.tabla_b} "
-        f"usando {payload.llave_cruce_a} = {payload.llave_cruce_b}. "
+        f"{payload.schema_name}.{payload.table_a} y {payload.schema_name}.{payload.table_b} "
+        f"usando {payload.join_key_a} = {payload.join_key_b}. "
         "Si las llaves de cruce no son únicas en los orígenes, el JOIN multiplicará "
         "filas Match (producto cartesiano parcial)."
     )
@@ -78,25 +78,25 @@ def build_analysis_sql(payload: AnalysisPayload) -> str:
     Nota técnica: un FULL OUTER JOIN sobre llaves no únicas produce filas Match
   duplicadas. Use log_join_uniqueness_warning() para auditar los orígenes.
     """
-    columnas_a = split_csv(payload.columnas_a)
-    columnas_b = split_csv(payload.columnas_b)
-    metodos = split_csv(payload.metodos_calculo)
+    columnas_a = split_csv(payload.columns_a)
+    columnas_b = split_csv(payload.columns_b)
+    metodos = split_csv(payload.calculation_methods)
 
     if len(columnas_a) != len(columnas_b) or len(columnas_a) != len(metodos):
         raise ValueError(
-            "columnas_a, columnas_b y metodos_calculo deben tener la misma cantidad de elementos."
+            "columns_a, columns_b and calculation_methods must have the same number of elements."
         )
 
     schema = _quote_ident(payload.schema_name)
-    tabla_a = _quote_ident(payload.tabla_a)
-    tabla_b = _quote_ident(payload.tabla_b)
-    llave_a = _quote_ident(payload.llave_cruce_a)
-    llave_b = _quote_ident(payload.llave_cruce_b)
+    tabla_a = _quote_ident(payload.table_a)
+    tabla_b = _quote_ident(payload.table_b)
+    llave_a = _quote_ident(payload.join_key_a)
+    llave_b = _quote_ident(payload.join_key_b)
 
     select_parts = [
         f"COALESCE(a.{llave_a}::text, b.{llave_b}::text) AS {_quote_ident('llave_cruce')}",
-        f"a.{llave_a} AS {_quote_ident(f'{payload.llave_cruce_a}_a')}",
-        f"b.{llave_b} AS {_quote_ident(f'{payload.llave_cruce_b}_b')}",
+        f"a.{llave_a} AS {_quote_ident(f'{payload.join_key_a}_a')}",
+        f"b.{llave_b} AS {_quote_ident(f'{payload.join_key_b}_b')}",
         (
             "CASE "
             f"WHEN a.{llave_a} IS NOT NULL AND b.{llave_b} IS NOT NULL THEN 'Match' "

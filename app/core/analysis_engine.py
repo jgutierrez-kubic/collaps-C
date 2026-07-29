@@ -3,7 +3,7 @@ import os
 import re
 import time
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Iterator, Literal
 from uuid import uuid4
 import httpx
 import pandas as pd
@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 OUTPUT_DIR = os.path.join("outputs", "analysis")
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, "resultado_analisis.csv")
+SQL_CHUNK_SIZE = 50_000
 
 # Alias legacy COLLAPS → collaps_engine (swap=True invierte operandos a val_b - val_a)
 _LEGACY_METHOD_MAP: dict[str, tuple[str, bool]] = {
@@ -43,11 +44,24 @@ _BOOLEAN_PURE_METHODS: frozenset[str] = frozenset({
     "contains_check",
 })
 
+# Columnas de metadatos/rastreo que se agrupan al final antes de persistir.
+_METADATA_COLUMNS: tuple[str, ...] = (
+    "run_id",
+    "created_at",
+    "timestamp",
+    "job_id",
+    "estado_cruce",
+    "analysis_id",
+    "analysis_name",
+    "source",
+)
+
 
 class AnalysisEngine:
     def __init__(self, payload: AnalysisPayload) -> None:
         self.payload = payload
         self._last_summary: dict[str, Any] | None = None
+        self._job_id: str | None = None
 
     @staticmethod
     def _sanitize_column_part(part: str) -> str:
@@ -65,6 +79,58 @@ class AnalysisEngine:
             AnalysisEngine._sanitize_column_part(col_a)
             == AnalysisEngine._sanitize_column_part(col_b)
         )
+
+    @staticmethod
+    def _indexed_column_name(index: int, suffix: str) -> str:
+        """Genera nombre indexado: '{index}_{suffix_sanitizado}'."""
+        clean_suffix = AnalysisEngine._sanitize_column_part(suffix)
+        return f"{index}_{clean_suffix}"
+
+    @staticmethod
+    def _indexed_source_column_name(index: int, col_name: str, side: str) -> str:
+        """Ej: index=0, col='nombre', side='A' → '0_nombreA'."""
+        san = AnalysisEngine._sanitize_column_part(col_name)
+        return f"{index}_{san}{side.upper()}"
+
+    @staticmethod
+    def _result_suffix(method_raw: str, method_id: str) -> str:
+        legacy_key = method_raw.strip().upper()
+        if legacy_key in _LEGACY_METHOD_MAP:
+            return AnalysisEngine._sanitize_column_part(legacy_key.lower())
+        return AnalysisEngine._sanitize_column_part(method_id)
+
+    @staticmethod
+    def _reorder_columns_for_persist(df: pd.DataFrame) -> pd.DataFrame:
+        """Agrupa columnas de metadatos/rastreo al final del DataFrame."""
+        metadata = [col for col in _METADATA_COLUMNS if col in df.columns]
+        data_columns = [col for col in df.columns if col not in metadata]
+        return df[data_columns + metadata]
+
+    @staticmethod
+    def _allocate_next_run_id(engine, schema_name: str, table_name: str) -> int:
+        """Obtiene el siguiente run_id incremental para la tabla destino."""
+        if not AnalysisEngine._table_exists(engine, schema_name, table_name):
+            return 1
+
+        sql = text(
+            f'SELECT MAX(run_id) AS max_run_id FROM "{schema_name}"."{table_name}"'
+        )
+        try:
+            with engine.connect() as conn:
+                row = conn.execute(sql).mappings().first()
+        except Exception as exc:
+            logger.info(
+                "No se pudo leer MAX(run_id) en %s.%s (%s) — iniciando en 1.",
+                schema_name,
+                table_name,
+                exc,
+            )
+            return 1
+
+        max_run_id = row["max_run_id"] if row else None
+        if max_run_id is None:
+            return 1
+        return int(max_run_id) + 1
 
     @staticmethod
     def _result_column_name(col_a: str, col_b: str, method_id: str) -> str:
@@ -285,17 +351,21 @@ class AnalysisEngine:
     @staticmethod
     def _stamp_run_metadata(
         df_result: pd.DataFrame,
-        run_id: str,
+        run_id: int,
         created_at: datetime,
         payload: AnalysisPayload,
+        job_id: str | None = None,
     ) -> pd.DataFrame:
         df_stamped = df_result.copy()
         df_stamped["run_id"] = run_id
         df_stamped["created_at"] = created_at
+        df_stamped["timestamp"] = created_at
+        if job_id:
+            df_stamped["job_id"] = job_id
         if payload.analysis_id:
             df_stamped["analysis_id"] = payload.analysis_id
-        if payload.nombre_analisis:
-            df_stamped["nombre_analisis"] = payload.nombre_analisis
+        if payload.analysis_name:
+            df_stamped["analysis_name"] = payload.analysis_name
         df_stamped["source"] = payload.source
         return df_stamped
 
@@ -317,17 +387,17 @@ class AnalysisEngine:
             return None
 
         schema_name = self.payload.schema_name
-        tabla_a = self.payload.tabla_a
-        tabla_b = self.payload.tabla_b
-        llave_a = self.payload.llave_cruce_a
-        llave_b = self.payload.llave_cruce_b
+        table_a = self.payload.table_a
+        table_b = self.payload.table_b
+        llave_a = self.payload.join_key_a
+        llave_b = self.payload.join_key_b
 
         stats_sql = text(
             f'SELECT '
-            f'(SELECT COUNT(*) FROM "{schema_name}"."{tabla_a}") AS total_a, '
-            f'(SELECT COUNT(DISTINCT "{llave_a}") FROM "{schema_name}"."{tabla_a}") AS unique_a, '
-            f'(SELECT COUNT(*) FROM "{schema_name}"."{tabla_b}") AS total_b, '
-            f'(SELECT COUNT(DISTINCT "{llave_b}") FROM "{schema_name}"."{tabla_b}") AS unique_b'
+            f'(SELECT COUNT(*) FROM "{schema_name}"."{table_a}") AS total_a, '
+            f'(SELECT COUNT(DISTINCT "{llave_a}") FROM "{schema_name}"."{table_a}") AS unique_a, '
+            f'(SELECT COUNT(*) FROM "{schema_name}"."{table_b}") AS total_b, '
+            f'(SELECT COUNT(DISTINCT "{llave_b}") FROM "{schema_name}"."{table_b}") AS unique_b'
         )
 
         engine = get_db_engine()
@@ -368,26 +438,87 @@ class AnalysisEngine:
             )
 
         return {
-            "total_rows": total_rows,
+            "totalRows": total_rows,
             "matches": matches,
-            "only_a": only_a,
-            "only_b": only_b,
-            "has_duplicates": has_duplicates,
+            "onlyA": only_a,
+            "onlyB": only_b,
+            "hasDuplicates": has_duplicates,
         }
 
+    @staticmethod
+    def _init_analytical_summary() -> dict[str, Any]:
+        return {
+            "totalRows": 0,
+            "matches": 0,
+            "onlyA": 0,
+            "onlyB": 0,
+            "hasDuplicates": False,
+        }
+
+    @staticmethod
+    def _merge_chunk_into_summary(
+        summary: dict[str, Any],
+        chunk: pd.DataFrame,
+    ) -> dict[str, Any]:
+        summary["totalRows"] += len(chunk)
+        if "estado_cruce" not in chunk.columns:
+            return summary
+
+        counts = chunk["estado_cruce"].value_counts()
+        summary["matches"] += int(counts.get("Match", 0))
+        summary["onlyA"] += int(counts.get("Only A", 0))
+        summary["onlyB"] += int(counts.get("Only B", 0))
+        return summary
+
+    @staticmethod
+    def _finalize_analytical_summary(
+        summary: dict[str, Any],
+        source_stats: dict[str, int] | None,
+    ) -> dict[str, Any]:
+        if not source_stats:
+            return summary
+
+        total_a = source_stats["total_a"]
+        unique_a = source_stats["unique_a"]
+        total_b = source_stats["total_b"]
+        unique_b = source_stats["unique_b"]
+        total_rows = summary["totalRows"]
+        summary["hasDuplicates"] = (
+            total_a > unique_a
+            or total_b > unique_b
+            or total_rows > (unique_a + unique_b)
+        )
+        return summary
+
+    @staticmethod
+    def _apply_transformation_row(
+        row: pd.Series,
+        col_a_key: str,
+        col_b_key: str,
+        method_id: str,
+        swap_operands: bool,
+    ) -> dict[str, Any]:
+        val_a = row[col_a_key]
+        val_b = row[col_b_key]
+        if swap_operands:
+            val_a, val_b = val_b, val_a
+        return execute_transformation(val_a, val_b, method_id)
+
     def _apply_collaps_transformations(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Aplica execute_transformation por cada par de columnas según metodos_calculo."""
+        """Apply execute_transformation per column pair according to calculation_methods."""
         result = df.copy()
-        columnas_a = split_csv(self.payload.columnas_a)
-        columnas_b = split_csv(self.payload.columnas_b)
-        metodos = split_csv(self.payload.metodos_calculo)
+        columnas_a = split_csv(self.payload.columns_a)
+        columnas_b = split_csv(self.payload.columns_b)
+        metodos = split_csv(self.payload.calculation_methods)
 
         logger.info(
             "⚙️ [PYTHON - COLLAPS] Aplicando %d transformación(es) vía collaps_engine...",
             len(metodos),
         )
 
-        for col_a, col_b, method_raw in zip(columnas_a, columnas_b, metodos):
+        for pair_index, (col_a, col_b, method_raw) in enumerate(
+            zip(columnas_a, columnas_b, metodos)
+        ):
             method_id, swap_operands, _method_label = self._resolve_method(method_raw)
             col_a_key = f"{col_a}_a"
             col_b_key = f"{col_b}_b"
@@ -398,44 +529,70 @@ class AnalysisEngine:
                     f"'{col_a_key}' / '{col_b_key}'"
                 )
 
-            result_values: list[object] = []
-            match_values: list[object] = []
+            transformations = result.apply(
+                self._apply_transformation_row,
+                axis=1,
+                col_a_key=col_a_key,
+                col_b_key=col_b_key,
+                method_id=method_id,
+                swap_operands=swap_operands,
+            )
 
-            for _, row in result.iterrows():
-                val_a = row[col_a_key]
-                val_b = row[col_b_key]
-                if swap_operands:
-                    val_a, val_b = val_b, val_a
+            for error_msg in transformations.map(lambda item: item.get("error")).dropna():
+                logger.warning(
+                    "⚠️ [PYTHON - COLLAPS] Error en %s para %s/%s: %s",
+                    method_id,
+                    col_a,
+                    col_b,
+                    error_msg,
+                )
 
-                transformation = execute_transformation(val_a, val_b, method_id)
-                if transformation["error"]:
-                    logger.warning(
-                        "⚠️ [PYTHON - COLLAPS] Error en %s para %s/%s: %s",
-                        method_id,
-                        col_a,
-                        col_b,
-                        transformation["error"],
-                    )
-                result_values.append(transformation["result_value"])
-                match_values.append(transformation["is_match"])
+            result_values = transformations.map(lambda item: item["result_value"])
+            match_values = transformations.map(lambda item: item["is_match"])
 
-            out_col = self._result_column_name(col_a, col_b, method_id)
+            indexed_a = self._indexed_source_column_name(pair_index, col_a, "A")
+            indexed_b = self._indexed_source_column_name(pair_index, col_b, "B")
+            indexed_method = self._indexed_column_name(pair_index, "metodo_aplicado")
+            out_col = self._indexed_column_name(
+                pair_index,
+                self._result_suffix(method_raw, method_id),
+            )
+
+            result[indexed_a] = result[col_a_key]
+            result[indexed_b] = result[col_b_key]
+            result[indexed_method] = method_raw.strip()
             result[out_col] = result_values
 
             is_pure_boolean = method_id in _BOOLEAN_PURE_METHODS
-            if not is_pure_boolean and any(value is not None for value in match_values):
-                match_col = self._match_column_name(col_a, col_b, method_id)
+            if not is_pure_boolean and match_values.notna().any():
+                match_col = self._indexed_column_name(pair_index, "is_match")
                 result[match_col] = match_values
 
             logger.info(
-                "⚙️ [PYTHON - COLLAPS] Método '%s' aplicado — columna destino '%s'",
+                "⚙️ [PYTHON - COLLAPS] Par %d — método '%s' → columnas '%s', '%s', '%s'",
+                pair_index,
                 method_id,
+                indexed_a,
+                indexed_b,
                 out_col,
             )
 
+        sql_source_columns = {
+            f"{col}_a" for col in columnas_a
+        } | {
+            f"{col}_b" for col in columnas_b
+        }
+        drop_columns = [col for col in sql_source_columns if col in result.columns]
+        if drop_columns:
+            result = result.drop(columns=drop_columns)
+
         return result
 
-    def _execute_analysis_query(self, sql: str) -> pd.DataFrame:
+    def _iter_analysis_chunks(
+        self,
+        sql: str,
+        chunksize: int = SQL_CHUNK_SIZE,
+    ) -> Iterator[pd.DataFrame]:
         if not DB_URL:
             raise RuntimeError(
                 "DATABASE_URL no está configurada. "
@@ -444,67 +601,136 @@ class AnalysisEngine:
 
         db_target = get_database_target(DB_URL)
         logger.info(
-            "🔌 [PYTHON - LOG 2] Conectando a la base de datos... destino=%s",
+            "🔌 [PYTHON - LOG 2] Conectando a la base de datos... destino=%s, chunksize=%d",
             db_target,
+            chunksize,
         )
 
         engine = get_db_engine()
         with engine.connect() as connection:
-            df = pd.read_sql(text(sql), con=connection)
+            chunk_reader = pd.read_sql(
+                text(sql),
+                con=connection,
+                chunksize=chunksize,
+            )
+            for chunk_index, chunk in enumerate(chunk_reader, start=1):
+                logger.info(
+                    "📊 [PYTHON - LOG 3] Chunk %d cargado — filas=%d",
+                    chunk_index,
+                    len(chunk),
+                )
+                yield chunk
 
-        logger.info(
-            "📊 [PYTHON - LOG 3] Consulta ejecutada exitosamente. Filas: %d",
-            len(df),
-        )
-        return df
-
-    def _persist_result(
+    def _persist_chunk(
         self,
         df_result: pd.DataFrame,
-        run_id: str,
+        *,
+        run_id: int,
         created_at: datetime,
+        job_id: str | None,
+        if_exists: Literal["append", "replace"],
+        migrate: bool,
     ) -> tuple[str, str] | None:
         schema_name = self.payload.schema_name
-        table_name = self.payload.tabla_destino
-        df_to_write = self._stamp_run_metadata(df_result, run_id, created_at, self.payload)
+        table_name = self.payload.target_table
+        df_to_write = self._stamp_run_metadata(
+            df_result, run_id, created_at, self.payload, job_id=job_id
+        )
+        df_to_write = self._reorder_columns_for_persist(df_to_write)
 
         if not DB_URL:
-            logger.warning(
-                "DATABASE_URL no configurada — fallback a exportación CSV local en %s",
-                OUTPUT_FILE,
-            )
             os.makedirs(OUTPUT_DIR, exist_ok=True)
-            df_to_write.to_csv(OUTPUT_FILE, index=False)
-            logger.info("Resultado exportado en %s (run_id=%s)", OUTPUT_FILE, run_id)
+            write_header = if_exists == "replace" or not os.path.exists(OUTPUT_FILE)
+            df_to_write.to_csv(
+                OUTPUT_FILE,
+                mode="w" if if_exists == "replace" else "a",
+                header=write_header,
+                index=False,
+            )
+            logger.info(
+                "Resultado exportado en %s (run_id=%d, mode=%s)",
+                OUTPUT_FILE,
+                run_id,
+                if_exists,
+            )
             return None
 
+        engine = get_db_engine()
+        if migrate:
+            self._auto_migrate_table(engine, schema_name, table_name, df_to_write)
+
         logger.info(
-            "💾 [PYTHON - LOG 4] Guardando resultados en %s.%s... filas=%d, run_id=%s",
+            "💾 [PYTHON - LOG 4] Guardando chunk en %s.%s... filas=%d, run_id=%d, if_exists=%s",
             schema_name,
             table_name,
             len(df_to_write),
             run_id,
+            if_exists,
         )
-
-        engine = get_db_engine()
-        self._auto_migrate_table(engine, schema_name, table_name, df_to_write)
 
         df_to_write.to_sql(
             name=table_name,
             schema=schema_name,
             con=engine,
-            if_exists="append",
+            if_exists=if_exists,
             index=False,
         )
-        logger.info(
-            "Resultado persistido en PostgreSQL — %s.%s (if_exists=append, run_id=%s)",
-            schema_name,
-            table_name,
-            run_id,
-        )
-
-        self._add_directus_primary_key(engine, schema_name, table_name)
         return schema_name, table_name
+
+    def _process_analysis_in_chunks(
+        self,
+        sql: str,
+        source_stats: dict[str, int] | None,
+        created_at: datetime,
+        job_id: str,
+    ) -> tuple[pd.DataFrame | None, tuple[str, str] | None]:
+        summary = self._init_analytical_summary()
+        last_chunk: pd.DataFrame | None = None
+        persisted: tuple[str, str] | None = None
+        run_id: int | None = None
+        table_preexisted: bool | None = None
+
+        for chunk_index, chunk in enumerate(self._iter_analysis_chunks(sql), start=1):
+            summary = self._merge_chunk_into_summary(summary, chunk)
+            transformed = self._apply_collaps_transformations(chunk)
+
+            if DB_URL:
+                engine = get_db_engine()
+                if run_id is None:
+                    run_id = self._allocate_next_run_id(
+                        engine,
+                        self.payload.schema_name,
+                        self.payload.target_table,
+                    )
+                    table_preexisted = self._table_exists(
+                        engine,
+                        self.payload.schema_name,
+                        self.payload.target_table,
+                    )
+
+                if chunk_index == 1 and not table_preexisted:
+                    if_exists: Literal["append", "replace"] = "replace"
+                else:
+                    if_exists = "append"
+                migrate = chunk_index == 1
+            else:
+                if run_id is None:
+                    run_id = 1
+                if_exists = "replace" if chunk_index == 1 else "append"
+                migrate = False
+
+            persisted = self._persist_chunk(
+                transformed,
+                run_id=run_id,
+                created_at=created_at,
+                job_id=job_id,
+                if_exists=if_exists,
+                migrate=migrate,
+            )
+            last_chunk = transformed
+
+        self._last_summary = self._finalize_analytical_summary(summary, source_stats)
+        return last_chunk, persisted
 
     def _send_callback(self, status: str) -> None:
         callback_url = self.payload.callback_url
@@ -517,9 +743,11 @@ class AnalysisEngine:
 
         body: dict[str, Any] = {
             "status": status,
-            "analysis_id": self.payload.analysis_id,
+            "analysisId": self.payload.analysis_id,
             "schema": self.payload.schema_name,
         }
+        if self._job_id:
+            body["jobId"] = self._job_id
         if self._last_summary is not None:
             body["summary"] = self._last_summary
 
@@ -538,15 +766,14 @@ class AnalysisEngine:
 
     def run(self, job_id: str | None = None) -> pd.DataFrame | None:
         job_id = job_id or str(uuid4())
-        run_id = str(uuid4())
+        self._job_id = job_id
         created_at = datetime.now(timezone.utc)
         result: pd.DataFrame | None = None
         started_at = time.perf_counter()
 
         logger.info(
-            "🐍 [PYTHON - JOB START] Iniciando job_id=%s, run_id=%s, analysis_id=%s, source=%s",
+            "🐍 [PYTHON - JOB START] Iniciando job_id=%s, analysis_id=%s, source=%s",
             job_id,
-            run_id,
             self.payload.analysis_id,
             self.payload.source,
         )
@@ -558,34 +785,35 @@ class AnalysisEngine:
             source_stats = self._fetch_source_uniqueness_stats()
             log_join_uniqueness_warning(self.payload, source_stats)
 
-            result = self._execute_analysis_query(sql)
-            self._last_summary = self._build_analytical_summary(result, source_stats)
+            result, persisted = self._process_analysis_in_chunks(
+                sql,
+                source_stats,
+                created_at=created_at,
+                job_id=job_id,
+            )
 
-            if self._last_summary["has_duplicates"]:
+            if self._last_summary and self._last_summary["hasDuplicates"]:
                 logger.warning(
                     "⚠️ [PYTHON - DUPLICADOS] El JOIN generó %d filas; posible producto cartesiano "
                     "(unique_a=%s, unique_b=%s). Revise unicidad de llaves de cruce.",
-                    self._last_summary["total_rows"],
+                    self._last_summary["totalRows"],
                     source_stats["unique_a"] if source_stats else "N/A",
                     source_stats["unique_b"] if source_stats else "N/A",
                 )
 
-            result = self._apply_collaps_transformations(result)
-            persisted = self._persist_result(result, run_id=run_id, created_at=created_at)
-
             if persisted:
                 schema_name, table_name = persisted
+                engine = get_db_engine()
+                self._add_directus_primary_key(engine, schema_name, table_name)
                 self._register_directus_collection(schema_name, table_name)
 
             self._send_callback("success")
 
             elapsed = time.perf_counter() - started_at
             logger.info(
-                "✅ [PYTHON - LOG 5] Proceso completado exitosamente en %.2f segundos — "
-                "job_id=%s, run_id=%s",
+                "✅ [PYTHON - LOG 5] Proceso completado exitosamente en %.2f segundos — job_id=%s",
                 elapsed,
                 job_id,
-                run_id,
             )
         except Exception as e:
             elapsed = time.perf_counter() - started_at

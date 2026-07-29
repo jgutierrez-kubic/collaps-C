@@ -5,6 +5,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.endpoints import router as condenser_router
+from app.api.worktable_endpoints import router as worktable_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -18,6 +19,7 @@ app = FastAPI(
 )
 
 app.include_router(condenser_router)
+app.include_router(worktable_router)
 app.mount("/app", StaticFiles(directory="static", html=True), name="static")
 
 

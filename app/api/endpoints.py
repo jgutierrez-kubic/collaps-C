@@ -27,9 +27,9 @@ async def create_analysis_job(
         status_code=status.HTTP_202_ACCEPTED,
         content={
             "status": "accepted",
-            "job_id": job_id,
-            "analysis_id": payload.analysis_id,
-            "message": "Análisis encolado exitosamente",
+            "jobId": job_id,
+            "analysisId": payload.analysis_id,
+            "message": "Analysis job queued successfully",
         },
     )
 
