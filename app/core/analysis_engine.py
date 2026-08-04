@@ -8,6 +8,13 @@ from uuid import uuid4
 import httpx
 import pandas as pd
 from sqlalchemy import inspect, text
+from tenacity import (
+    RetryCallState,
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from app.core.config import DB_URL
 from app.core.db import get_database_target, get_db_engine
@@ -22,6 +29,26 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+_CALLBACK_MAX_ATTEMPTS = 5
+_RETRYABLE_HTTP_STATUS_CODES = frozenset({429, 408, 500, 502, 503, 504})
+
+
+def _is_retryable_callback_error(exc: BaseException) -> bool:
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in _RETRYABLE_HTTP_STATUS_CODES
+    return isinstance(exc, httpx.RequestError)
+
+
+def _log_callback_retry(retry_state: RetryCallState) -> None:
+    exc = retry_state.outcome.exception() if retry_state.outcome else None
+    logger.warning(
+        "Reintentando callback HTTP — intento %d/%d, espera %.1fs, error: %s",
+        retry_state.attempt_number,
+        _CALLBACK_MAX_ATTEMPTS,
+        retry_state.upcoming_sleep or 0,
+        exc,
+    )
 
 OUTPUT_DIR = os.path.join("outputs", "analysis")
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, "resultado_analisis.csv")
@@ -624,6 +651,19 @@ class AnalysisEngine:
         self._last_summary = self._finalize_analytical_summary(summary, source_stats)
         return last_chunk, persisted
 
+    @staticmethod
+    @retry(
+        stop=stop_after_attempt(_CALLBACK_MAX_ATTEMPTS),
+        wait=wait_exponential(multiplier=1, min=2, max=20),
+        retry=retry_if_exception(_is_retryable_callback_error),
+        before_sleep=_log_callback_retry,
+        reraise=True,
+    )
+    def _execute_http_callback(callback_url: str, body: dict[str, Any]) -> None:
+        with httpx.Client(timeout=30.0) as client:
+            response = client.post(callback_url, json=body)
+            response.raise_for_status()
+
     def _send_callback(self, status: str) -> None:
         callback_url = self.payload.callback_url
         if not callback_url:
@@ -647,9 +687,7 @@ class AnalysisEngine:
             body["summary"] = self._last_summary
 
         try:
-            with httpx.Client(timeout=30.0) as client:
-                response = client.post(callback_url, json=body)
-                response.raise_for_status()
+            self._execute_http_callback(callback_url, body)
             logger.info(
                 "Callback enviado — url=%s, analysis_id=%s, status=%s",
                 callback_url,
@@ -657,7 +695,12 @@ class AnalysisEngine:
                 status,
             )
         except Exception as exc:
-            logger.error("Fallo al enviar callback a %s: %s", callback_url, exc)
+            logger.error(
+                "Fallo definitivo al enviar callback a %s tras %d intentos: %s",
+                callback_url,
+                _CALLBACK_MAX_ATTEMPTS,
+                exc,
+            )
 
     def run(self, job_id: str | None = None) -> pd.DataFrame | None:
         job_id = job_id or str(uuid4())
