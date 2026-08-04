@@ -1,4 +1,5 @@
 import logging
+import os
 from functools import lru_cache
 from urllib.parse import urlparse
 
@@ -8,6 +9,11 @@ from sqlalchemy.engine import Engine
 from app.core.config import DB_URL
 
 logger = logging.getLogger(__name__)
+
+_CPU_COUNT = int(os.getenv("DB_POOL_CPU_COUNT", os.cpu_count() or 1))
+_DISK_COUNT = int(os.getenv("DB_POOL_DISK_COUNT", 1))
+_POOL_SIZE = (_CPU_COUNT * 2) + _DISK_COUNT
+_POOL_TIMEOUT = 5
 
 
 def normalize_database_url(url: str) -> str:
@@ -37,10 +43,19 @@ def get_db_engine() -> Engine:
     db_url = normalize_database_url(DB_URL)
     target = get_database_target(db_url)
 
-    logger.info("Inicializando engine SQLAlchemy — destino=%s", target)
+    logger.info(
+        "Inicializando engine SQLAlchemy — destino=%s, pool_size=%d, max_overflow=0, "
+        "pool_timeout=%d",
+        target,
+        _POOL_SIZE,
+        _POOL_TIMEOUT,
+    )
 
     return create_engine(
         db_url,
+        pool_size=_POOL_SIZE,
+        max_overflow=0,
+        pool_timeout=_POOL_TIMEOUT,
         pool_pre_ping=True,
         pool_recycle=300,
         connect_args={"connect_timeout": 10},

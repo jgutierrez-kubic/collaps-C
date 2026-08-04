@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 OUTPUT_DIR = os.path.join("outputs", "analysis")
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, "resultado_analisis.csv")
-SQL_CHUNK_SIZE = 50_000
+SQL_CHUNK_SIZE = int(os.getenv("SQL_CHUNK_SIZE", "10000"))
 
 # Alias legacy COLLAPS → collaps_engine (swap=True invierte operandos a val_b - val_a)
 _LEGACY_METHOD_MAP: dict[str, tuple[str, bool]] = {
@@ -62,6 +62,8 @@ class AnalysisEngine:
         self.payload = payload
         self._last_summary: dict[str, Any] | None = None
         self._job_id: str | None = None
+        self.update_schema = False
+        self._filas_insertadas = 0
 
     @staticmethod
     def _sanitize_column_part(part: str) -> str:
@@ -107,17 +109,20 @@ class AnalysisEngine:
         return df[data_columns + metadata]
 
     @staticmethod
-    def _allocate_next_run_id(engine, schema_name: str, table_name: str) -> int:
+    def _allocate_next_run_id(conn_or_engine, schema_name: str, table_name: str) -> int:
         """Obtiene el siguiente run_id incremental para la tabla destino."""
-        if not AnalysisEngine._table_exists(engine, schema_name, table_name):
+        if not AnalysisEngine._table_exists(conn_or_engine, schema_name, table_name):
             return 1
 
         sql = text(
             f'SELECT MAX(run_id) AS max_run_id FROM "{schema_name}"."{table_name}"'
         )
         try:
-            with engine.connect() as conn:
-                row = conn.execute(sql).mappings().first()
+            if hasattr(conn_or_engine, "connect"):
+                with conn_or_engine.connect() as conn:
+                    row = conn.execute(sql).mappings().first()
+            else:
+                row = conn_or_engine.execute(sql).mappings().first()
         except Exception as exc:
             logger.info(
                 "No se pudo leer MAX(run_id) en %s.%s (%s) — iniciando en 1.",
@@ -163,59 +168,49 @@ class AnalysisEngine:
         return "TEXT"
 
     @staticmethod
-    def _table_exists(engine, schema_name: str, table_name: str) -> bool:
-        inspector = inspect(engine)
+    def _table_exists(conn_or_engine, schema_name: str, table_name: str) -> bool:
+        inspector = inspect(conn_or_engine)
         return inspector.has_table(table_name, schema=schema_name)
 
     @staticmethod
-    def _get_existing_columns(engine, schema_name: str, table_name: str) -> set[str]:
-        inspector = inspect(engine)
+    def _get_existing_columns(conn_or_engine, schema_name: str, table_name: str) -> set[str]:
+        inspector = inspect(conn_or_engine)
         columns = inspector.get_columns(table_name, schema=schema_name)
         return {column["name"] for column in columns}
 
     def _auto_migrate_table(
         self,
-        engine,
+        conn,
         schema_name: str,
         table_name: str,
         df: pd.DataFrame,
-    ) -> None:
-        if not self._table_exists(engine, schema_name, table_name):
-            logger.info(
-                "🛠️ [PYTHON - AUTO-MIGRATION] Tabla %s.%s no existe — se creará automáticamente.",
-                schema_name,
-                table_name,
-            )
-            return
+    ) -> bool:
+        """Ejecuta ALTER TABLE ADD COLUMN para columnas nuevas. Retorna True si hubo cambios."""
+        if not self._table_exists(conn, schema_name, table_name):
+            return False
 
-        existing_columns = self._get_existing_columns(engine, schema_name, table_name)
+        existing_columns = self._get_existing_columns(conn, schema_name, table_name)
         new_columns = [col for col in df.columns if col not in existing_columns]
-
         if not new_columns:
-            logger.info(
-                "🛠️ [PYTHON - AUTO-MIGRATION] Esquema alineado — sin columnas nuevas en %s.%s",
-                schema_name,
-                table_name,
-            )
-            return
+            return False
 
         qualified_table = f"{self._quote_ident(schema_name)}.{self._quote_ident(table_name)}"
 
-        with engine.begin() as conn:
-            for column in new_columns:
-                pg_type = self._pandas_dtype_to_pg(df[column])
-                ddl = (
-                    f"ALTER TABLE {qualified_table} "
-                    f"ADD COLUMN IF NOT EXISTS {self._quote_ident(column)} {pg_type}"
-                )
-                logger.info(
-                    "🛠️ [PYTHON - AUTO-MIGRATION] Agregando nueva columna '%s' (%s) a la tabla %s.%s...",
-                    column,
-                    pg_type,
-                    schema_name,
-                    table_name,
-                )
-                conn.execute(text(ddl))
+        for column in new_columns:
+            pg_type = self._pandas_dtype_to_pg(df[column])
+            ddl = (
+                f"ALTER TABLE {qualified_table} "
+                f"ADD COLUMN IF NOT EXISTS {self._quote_ident(column)} {pg_type}"
+            )
+            conn.execute(text(ddl))
+
+        logger.info(
+            "🛠️ [AUTO-MIGRATION] %d columna(s) nueva(s) en %s.%s",
+            len(new_columns),
+            schema_name,
+            table_name,
+        )
+        return True
 
     @staticmethod
     def _stamp_run_metadata(
@@ -462,6 +457,7 @@ class AnalysisEngine:
         sql: str,
         chunksize: int = SQL_CHUNK_SIZE,
     ) -> Iterator[pd.DataFrame]:
+        """Lee el SQL de análisis en chunks; cada chunk usa una conexión corta y aislada."""
         if not DB_URL:
             raise RuntimeError(
                 "DATABASE_URL no está configurada. "
@@ -476,19 +472,35 @@ class AnalysisEngine:
         )
 
         engine = get_db_engine()
-        with engine.connect() as connection:
-            chunk_reader = pd.read_sql(
-                text(sql),
-                con=connection,
-                chunksize=chunksize,
+        offset = 0
+        chunk_index = 0
+
+        while True:
+            chunk_sql = text(
+                f"SELECT * FROM ({sql}) AS _analysis_chunk "
+                "LIMIT :limit OFFSET :offset"
             )
-            for chunk_index, chunk in enumerate(chunk_reader, start=1):
-                logger.info(
-                    "📊 [PYTHON - LOG 3] Chunk %d cargado — filas=%d",
-                    chunk_index,
-                    len(chunk),
+            with engine.connect() as connection:
+                chunk = pd.read_sql(
+                    chunk_sql,
+                    con=connection,
+                    params={"limit": chunksize, "offset": offset},
                 )
-                yield chunk
+
+            if chunk.empty:
+                break
+
+            chunk_index += 1
+            logger.info(
+                "📊 [PYTHON - LOG 3] Chunk %d cargado — filas=%d",
+                chunk_index,
+                len(chunk),
+            )
+            yield chunk
+
+            if len(chunk) < chunksize:
+                break
+            offset += chunksize
 
     def _persist_chunk(
         self,
@@ -516,6 +528,9 @@ class AnalysisEngine:
                 header=write_header,
                 index=False,
             )
+            if if_exists == "replace":
+                self.update_schema = True
+            self._filas_insertadas += len(df_to_write)
             logger.info(
                 "Resultado exportado en %s (run_id=%d, mode=%s)",
                 OUTPUT_FILE,
@@ -525,8 +540,9 @@ class AnalysisEngine:
             return None
 
         engine = get_db_engine()
-        if migrate:
-            self._auto_migrate_table(engine, schema_name, table_name, df_to_write)
+
+        if if_exists == "replace":
+            self.update_schema = True
 
         logger.info(
             "💾 [PYTHON - LOG 4] Guardando chunk en %s.%s... filas=%d, run_id=%d, if_exists=%s",
@@ -537,13 +553,19 @@ class AnalysisEngine:
             if_exists,
         )
 
-        df_to_write.to_sql(
-            name=table_name,
-            schema=schema_name,
-            con=engine,
-            if_exists=if_exists,
-            index=False,
-        )
+        with engine.begin() as conn:
+            if migrate and self._auto_migrate_table(conn, schema_name, table_name, df_to_write):
+                self.update_schema = True
+
+            df_to_write.to_sql(
+                name=table_name,
+                schema=schema_name,
+                con=conn,
+                if_exists=if_exists,
+                index=False,
+            )
+
+        self._filas_insertadas += len(df_to_write)
         return schema_name, table_name
 
     def _process_analysis_in_chunks(
@@ -564,18 +586,19 @@ class AnalysisEngine:
             transformed = self._apply_collaps_transformations(chunk)
 
             if DB_URL:
-                engine = get_db_engine()
                 if run_id is None:
-                    run_id = self._allocate_next_run_id(
-                        engine,
-                        self.payload.schema_name,
-                        self.payload.target_table,
-                    )
-                    table_preexisted = self._table_exists(
-                        engine,
-                        self.payload.schema_name,
-                        self.payload.target_table,
-                    )
+                    engine = get_db_engine()
+                    with engine.connect() as conn:
+                        run_id = self._allocate_next_run_id(
+                            conn,
+                            self.payload.schema_name,
+                            self.payload.target_table,
+                        )
+                        table_preexisted = self._table_exists(
+                            conn,
+                            self.payload.schema_name,
+                            self.payload.target_table,
+                        )
 
                 if chunk_index == 1 and not table_preexisted:
                     if_exists: Literal["append", "replace"] = "replace"
@@ -615,6 +638,8 @@ class AnalysisEngine:
             "analysisId": self.payload.analysis_id,
             "schema": self.payload.schema_name,
             "targetTable": self.payload.target_table,
+            "updateSchema": self.update_schema,
+            "filas_insertadas": self._filas_insertadas,
         }
         if self._job_id:
             body["jobId"] = self._job_id
@@ -637,6 +662,8 @@ class AnalysisEngine:
     def run(self, job_id: str | None = None) -> pd.DataFrame | None:
         job_id = job_id or str(uuid4())
         self._job_id = job_id
+        self.update_schema = False
+        self._filas_insertadas = 0
         created_at = datetime.now(timezone.utc)
         result: pd.DataFrame | None = None
         started_at = time.perf_counter()

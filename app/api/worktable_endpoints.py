@@ -24,7 +24,7 @@ async def create_worktable(
     1. Validate payload (source_table, target_table, group_by, order_by).
     2. Enqueue WorktableEngine.run() in background.
     3. Engine reads/groups in Postgres, assigns incremental run_id,
-       persists to target_table and registers the Directus collection.
+       and persists to target_table.
     """
     job_id = str(uuid4())
     engine = WorktableEngine(payload)

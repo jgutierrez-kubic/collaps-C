@@ -6,10 +6,10 @@ from uuid import uuid4
 
 import httpx
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 
-from app.core.analysis_engine import AnalysisEngine
 from app.core.config import DB_URL
+from app.core.db import get_db_engine
 from app.models.payload import DataSource, JobPayload
 
 logging.basicConfig(
@@ -45,7 +45,7 @@ class CondenserEngine:
                     "Exporte la variable de entorno antes de usar fuentes database."
                 )
 
-            engine = create_engine(DB_URL)
+            engine = get_db_engine()
             with engine.connect() as connection:
                 return pd.read_sql(source.query, con=connection)
 
@@ -140,29 +140,6 @@ class CondenserEngine:
         return df_result
 
     @staticmethod
-    def _add_directus_primary_key(engine, schema_name: str, table_name: str) -> None:
-        # IF NOT EXISTS evita fallo en la 2ª ejecución (modo append histórico).
-        ddl = (
-            f'ALTER TABLE "{schema_name}"."{table_name}" '
-            "ADD COLUMN IF NOT EXISTS id SERIAL PRIMARY KEY"
-        )
-        try:
-            with engine.begin() as conn:
-                conn.execute(text(ddl))
-            logger.info(
-                "Columna id SERIAL PRIMARY KEY verificada/añadida — %s.%s",
-                schema_name,
-                table_name,
-            )
-        except Exception as exc:
-            logger.warning(
-                "No se pudo añadir id PRIMARY KEY en %s.%s (columna o constraint ya existe): %s",
-                schema_name,
-                table_name,
-                exc,
-            )
-
-    @staticmethod
     def _stamp_run_metadata(
         df_result: pd.DataFrame,
         run_id: str,
@@ -172,10 +149,6 @@ class CondenserEngine:
         df_stamped["run_id"] = run_id
         df_stamped["created_at"] = created_at
         return df_stamped
-
-    @staticmethod
-    def _register_directus_collection(schema_name: str, table_name: str) -> None:
-        AnalysisEngine._register_directus_collection(schema_name, table_name)
 
     def _persist_result(
         self,
@@ -222,14 +195,15 @@ class CondenserEngine:
             if_exists,
             run_id,
         )
-        engine = create_engine(DB_URL)
-        df_to_write.to_sql(
-            name=table_name,
-            schema=schema_name,
-            con=engine,
-            if_exists=if_exists,
-            index=False,
-        )
+        engine = get_db_engine()
+        with engine.begin() as conn:
+            df_to_write.to_sql(
+                name=table_name,
+                schema=schema_name,
+                con=conn,
+                if_exists=if_exists,
+                index=False,
+            )
         logger.info(
             "Resultado persistido en PostgreSQL — %s.%s (if_exists=%s, run_id=%s)",
             schema_name,
@@ -238,7 +212,6 @@ class CondenserEngine:
             run_id,
         )
 
-        self._add_directus_primary_key(engine, schema_name, table_name)
         return schema_name, table_name
 
     def _send_webhook(self, job_id: str, status: str, message: str) -> None:
@@ -284,9 +257,6 @@ class CondenserEngine:
             result = self._mr_fusion(df_condensado)
 
             persisted = self._persist_result(result, run_id=run_id, created_at=created_at)
-            if persisted:
-                schema_name, table_name = persisted
-                self._register_directus_collection(schema_name, table_name)
 
             job_status = "success"
             logger.info(

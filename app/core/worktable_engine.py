@@ -153,12 +153,8 @@ class WorktableEngine:
                 if_exists="append",
                 index=False,
             )
-            AnalysisEngine._add_directus_primary_key(engine, schema_name, table_name)
 
-            # Paso 4: Auto-registro en Directus (multi-tenant, idempotente).
-            AnalysisEngine._register_directus_collection(schema_name, table_name)
-
-            # TODO: Paso 5 — callback HTTP a n8n (mismo patrón que AnalysisEngine._send_callback).
+            # TODO: callback HTTP to n8n (same pattern as AnalysisEngine._send_callback).
 
             elapsed = time.perf_counter() - started_at
             logger.info(

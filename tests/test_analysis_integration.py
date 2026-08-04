@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import httpx
 import pandas as pd
 
 from app.core.analysis_engine import AnalysisEngine
@@ -177,6 +176,66 @@ def test_build_analytical_summary_with_duplicates_flag() -> None:
     assert summary["hasDuplicates"] is True
 
 
+def test_auto_migrate_table_returns_true_when_columns_added(monkeypatch) -> None:
+    engine = AnalysisEngine(AnalysisPayload.model_validate(_condenser_payload()))
+    df = pd.DataFrame({"new_col": [1]})
+
+    monkeypatch.setattr(AnalysisEngine, "_table_exists", staticmethod(lambda *_a, **_k: True))
+    monkeypatch.setattr(
+        AnalysisEngine,
+        "_get_existing_columns",
+        staticmethod(lambda *_a, **_k: {"run_id"}),
+    )
+
+    class FakeConn:
+        def execute(self, _ddl):
+            return None
+
+    assert engine._auto_migrate_table(FakeConn(), "schema", "tabla", df) is True
+    assert engine.update_schema is False
+
+
+def test_persist_chunk_sets_update_schema_on_replace(monkeypatch) -> None:
+    payload = AnalysisPayload.model_validate(_condenser_payload())
+    engine = AnalysisEngine(payload)
+    df = pd.DataFrame({"cantidad_a": [1.0], "cantidad_b": [2.0]})
+
+    monkeypatch.setattr(AnalysisEngine, "_auto_migrate_table", lambda *_a, **_k: False)
+
+    class FakeConn:
+        pass
+
+    class FakeBegin:
+        def __enter__(self):
+            return FakeConn()
+
+        def __exit__(self, *_args):
+            return False
+
+    class FakeEngine:
+        def begin(self):
+            return FakeBegin()
+
+    monkeypatch.setattr("app.core.analysis_engine.get_db_engine", lambda: FakeEngine())
+    monkeypatch.setattr(
+        pd.DataFrame,
+        "to_sql",
+        lambda self, *args, **kwargs: None,
+    )
+
+    engine._persist_chunk(
+        df,
+        run_id=1,
+        created_at=pd.Timestamp("2024-01-01", tz="UTC"),
+        job_id="job-1",
+        if_exists="replace",
+        migrate=False,
+    )
+
+    assert engine.update_schema is True
+    assert engine._filas_insertadas == 1
+
+
 def test_result_column_name_same_columns() -> None:
     name = AnalysisEngine._result_column_name("Cantidad", "cantidad", "math_sub")
     assert name == "cantidad__math_sub"
@@ -185,111 +244,3 @@ def test_result_column_name_same_columns() -> None:
 def test_result_column_name_different_columns() -> None:
     name = AnalysisEngine._result_column_name("Cantidad", "Cantidad/Modelo", "math_sub")
     assert name == "cantidad__vs__cantidad_modelo__math_sub"
-
-
-def test_fetch_directus_credentials_returns_tuple() -> None:
-    class FakeResult:
-        def mappings(self):
-            return self
-
-        def first(self):
-            return {
-                "directus_url": "https://directus.example.com/",
-                "Instance_Token": "secret-token",
-            }
-
-    class FakeConn:
-        def execute(self, _query, _params):
-            return FakeResult()
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-    class FakeEngine:
-        def connect(self):
-            return FakeConn()
-
-    creds = AnalysisEngine._fetch_directus_credentials(FakeEngine(), "s00001_incancer")
-    assert creds == ("https://directus.example.com/", "secret-token")
-
-
-def test_fetch_directus_credentials_missing_row_returns_none() -> None:
-    class FakeResult:
-        def mappings(self):
-            return self
-
-        def first(self):
-            return None
-
-    class FakeConn:
-        def execute(self, _query, _params):
-            return FakeResult()
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-    class FakeEngine:
-        def connect(self):
-            return FakeConn()
-
-    assert AnalysisEngine._fetch_directus_credentials(FakeEngine(), "unknown_schema") is None
-
-
-def test_fetch_directus_credentials_empty_values_returns_none() -> None:
-    class FakeResult:
-        def mappings(self):
-            return self
-
-        def first(self):
-            return {"directus_url": "", "Instance_Token": "token"}
-
-    class FakeConn:
-        def execute(self, _query, _params):
-            return FakeResult()
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-    class FakeEngine:
-        def connect(self):
-            return FakeConn()
-
-    assert AnalysisEngine._fetch_directus_credentials(FakeEngine(), "s00001_incancer") is None
-
-
-def test_is_directus_collection_exists_error_detects_invalid_payload() -> None:
-    response = httpx.Response(
-        400,
-        json={
-            "errors": [
-                {
-                    "message": 'Collection "c_resultados" already exists',
-                    "extensions": {"code": "INVALID_PAYLOAD"},
-                }
-            ]
-        },
-        request=httpx.Request("POST", "https://directus.example.com/collections"),
-    )
-    exc = httpx.HTTPStatusError("error", request=response.request, response=response)
-
-    assert AnalysisEngine._is_directus_collection_exists_error(exc) is True
-
-
-def test_is_directus_collection_exists_error_ignores_other_status_codes() -> None:
-    response = httpx.Response(
-        403,
-        json={"errors": [{"message": "Forbidden", "extensions": {"code": "FORBIDDEN"}}]},
-        request=httpx.Request("POST", "https://directus.example.com/collections"),
-    )
-    exc = httpx.HTTPStatusError("error", request=response.request, response=response)
-
-    assert AnalysisEngine._is_directus_collection_exists_error(exc) is False
