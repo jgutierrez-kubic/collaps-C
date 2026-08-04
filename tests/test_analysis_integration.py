@@ -46,6 +46,21 @@ def test_apply_collaps_transformations_legacy_diferencia() -> None:
     assert "cantidad_a" not in result.columns
 
 
+def test_apply_collaps_transformations_vectorized_math_add() -> None:
+    payload = AnalysisPayload.model_validate(
+        _condenser_payload(calculationMethods="math_add", targetTable="resultados")
+    )
+    engine = AnalysisEngine(payload)
+    df = pd.DataFrame({"cantidad_a": [10.0, 20.0, None], "cantidad_b": [5.0, 8.0, 3.0]})
+
+    result = engine._apply_collaps_transformations(df)
+
+    assert "0_math_add" in result.columns
+    assert result["0_math_add"].iloc[0] == 15.0
+    assert result["0_math_add"].iloc[1] == 28.0
+    assert pd.isna(result["0_math_add"].iloc[2])
+
+
 def test_apply_collaps_transformations_registry_method() -> None:
     payload = AnalysisPayload.model_validate(
         _condenser_payload(
