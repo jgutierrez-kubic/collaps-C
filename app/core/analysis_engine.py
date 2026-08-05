@@ -1,11 +1,9 @@
 import logging
 import os
-import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Iterator, Literal
 from uuid import uuid4
-import numpy as np
 import httpx
 import pandas as pd
 from sqlalchemy import inspect, text
@@ -19,14 +17,14 @@ from tenacity import (
 
 from app.core.config import DB_URL
 from app.core.db import get_database_target, get_db_engine
-from app.core.query_builder import build_analysis_sql, log_join_uniqueness_warning, split_csv
-from app.models.payload import AnalysisPayload
-from collaps_engine.comparison_engine import (
-    OPERATIONS_REGISTRY,
-    _normalize_text,
-    _to_bool,
+from app.core.query_builder import (
+    build_analysis_sql,
+    log_join_uniqueness_warning,
+    sanitize_column_part,
+    split_csv,
 )
-from collaps_engine.transformer import execute_transformation
+from app.models.payload import AnalysisPayload
+from collaps_engine.comparison_engine import OPERATIONS_REGISTRY
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,17 +63,6 @@ _LEGACY_METHOD_MAP: dict[str, tuple[str, bool]] = {
     "IGUALDAD": ("strict_equal", False),
 }
 
-# Métodos cuyo result_value ya es booleano — no se anexa columna is_match adicional.
-_BOOLEAN_PURE_METHODS: frozenset[str] = frozenset({
-    "strict_equal",
-    "normalized_equal",
-    "date_equal",
-    "regex_match",
-    "null_check",
-    "boolean_logic",
-    "contains_check",
-})
-
 # Columnas de metadatos/rastreo que se agrupan al final antes de persistir.
 _METADATA_COLUMNS: tuple[str, ...] = (
     "run_id",
@@ -87,19 +74,6 @@ _METADATA_COLUMNS: tuple[str, ...] = (
     "analysis_name",
     "source",
 )
-
-# Métodos con implementación vectorizada nativa en Pandas (sin iterrows / apply por fila).
-_VECTORIZED_METHOD_IDS: frozenset[str] = frozenset({
-    "math_add",
-    "math_sub",
-    "math_diff_abs",
-    "math_diff_pct",
-    "math_ratio",
-    "strict_equal",
-    "normalized_equal",
-    "date_equal",
-    "boolean_logic",
-})
 
 
 class AnalysisEngine:
@@ -113,12 +87,7 @@ class AnalysisEngine:
     @staticmethod
     def _sanitize_column_part(part: str) -> str:
         """Sanitiza una parte individual de nombre de columna SQL."""
-        clean = str(part).strip().lower().replace("/", "_").replace(" ", "_")
-        clean = re.sub(r"[^a-z0-9_]", "_", clean)
-        clean = re.sub(r"_+", "_", clean).strip("_")
-        if not clean:
-            raise ValueError(f"No se pudo sanitizar la parte de columna: '{part}'")
-        return clean
+        return sanitize_column_part(part)
 
     @staticmethod
     def _columns_are_equivalent(col_a: str, col_b: str) -> bool:
@@ -399,234 +368,11 @@ class AnalysisEngine:
         )
         return summary
 
-    @staticmethod
-    def _operand_series_pair(
-        series_a: pd.Series,
-        series_b: pd.Series,
-        swap_operands: bool,
-    ) -> tuple[pd.Series, pd.Series]:
-        if swap_operands:
-            return series_b, series_a
-        return series_a, series_b
-
-    @staticmethod
-    def _numeric_series_pair(series_a: pd.Series, series_b: pd.Series) -> tuple[pd.Series, pd.Series]:
-        return (
-            pd.to_numeric(series_a, errors="coerce"),
-            pd.to_numeric(series_b, errors="coerce"),
-        )
-
-    @staticmethod
-    def _empty_match_series(index: pd.Index) -> pd.Series:
-        return pd.Series(pd.NA, index=index, dtype=object)
-
-    @staticmethod
-    def _vectorized_transformation_result(
-        method_id: str,
-        series_a: pd.Series,
-        series_b: pd.Series,
-    ) -> tuple[pd.Series, pd.Series] | None:
-        """Vectorización nativa Pandas. Retorna None si el método requiere apply por fila."""
-        if method_id not in _VECTORIZED_METHOD_IDS:
-            return None
-
-        index = series_a.index
-        match_values = AnalysisEngine._empty_match_series(index)
-
-        if method_id == "math_add":
-            a_num, b_num = AnalysisEngine._numeric_series_pair(series_a, series_b)
-            return a_num + b_num, match_values
-
-        if method_id == "math_sub":
-            a_num, b_num = AnalysisEngine._numeric_series_pair(series_a, series_b)
-            return a_num - b_num, match_values
-
-        if method_id == "math_diff_abs":
-            a_num, b_num = AnalysisEngine._numeric_series_pair(series_a, series_b)
-            return (a_num - b_num).abs(), match_values
-
-        if method_id == "math_diff_pct":
-            a_num, b_num = AnalysisEngine._numeric_series_pair(series_a, series_b)
-            result = pd.Series(np.nan, index=index, dtype=float)
-            valid = a_num.notna() & b_num.notna()
-            both_zero = valid & (a_num == 0) & (b_num == 0)
-            a_zero_b_nonzero = valid & (a_num == 0) & (b_num != 0)
-            a_nonzero = valid & (a_num != 0)
-            result.loc[a_zero_b_nonzero] = np.inf
-            result.loc[a_nonzero] = ((a_num - b_num) / a_num) * 100.0
-            result.loc[both_zero] = np.nan
-            return result, match_values
-
-        if method_id == "math_ratio":
-            a_num, b_num = AnalysisEngine._numeric_series_pair(series_a, series_b)
-            result = pd.Series(np.nan, index=index, dtype=float)
-            valid = a_num.notna() & b_num.notna() & (b_num != 0)
-            result.loc[valid] = a_num.loc[valid] / b_num.loc[valid]
-            return result, match_values
-
-        if method_id == "strict_equal":
-            return series_a == series_b, match_values
-
-        if method_id == "normalized_equal":
-            a_norm = series_a.map(_normalize_text)
-            b_norm = series_b.map(_normalize_text)
-            return a_norm == b_norm, match_values
-
-        if method_id == "date_equal":
-            dt_a = pd.to_datetime(series_a, utc=True, errors="coerce")
-            dt_b = pd.to_datetime(series_b, utc=True, errors="coerce")
-            result = dt_a.dt.normalize() == dt_b.dt.normalize()
-            result = result.fillna(False)
-            return result, match_values
-
-        if method_id == "boolean_logic":
-            a_bool = series_a.map(_to_bool)
-            b_bool = series_b.map(_to_bool)
-            return a_bool & b_bool, match_values
-
-        return None
-
-    @staticmethod
-    def _apply_transformation_via_apply(
-        df: pd.DataFrame,
-        col_a_key: str,
-        col_b_key: str,
-        method_id: str,
-        swap_operands: bool,
-    ) -> tuple[pd.Series, pd.Series, list[str]]:
-        """Fallback por fila vía .apply(axis=1) para métodos no vectorizables."""
-        transformations = df.apply(
-            AnalysisEngine._apply_transformation_row,
-            axis=1,
-            col_a_key=col_a_key,
-            col_b_key=col_b_key,
-            method_id=method_id,
-            swap_operands=swap_operands,
-        )
-        transformation_rows = transformations.tolist()
-        errors = [
-            str(item["error"])
-            for item in transformation_rows
-            if item.get("error")
-        ]
-        result_values = pd.Series(
-            [item["result_value"] for item in transformation_rows],
-            index=df.index,
-        )
-        match_values = pd.Series(
-            [item["is_match"] for item in transformation_rows],
-            index=df.index,
-            dtype=object,
-        )
-        return result_values, match_values, errors
-
-    @staticmethod
-    def _apply_transformation_row(
-        row: pd.Series,
-        col_a_key: str,
-        col_b_key: str,
-        method_id: str,
-        swap_operands: bool,
-    ) -> dict[str, Any]:
-        val_a = row[col_a_key]
-        val_b = row[col_b_key]
-        if swap_operands:
-            val_a, val_b = val_b, val_a
-        return execute_transformation(val_a, val_b, method_id)
-
     def _apply_collaps_transformations(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Apply execute_transformation per column pair — vectorizado o .apply(axis=1)."""
-        result = df.copy()
-        columnas_a = split_csv(self.payload.columns_a)
-        columnas_b = split_csv(self.payload.columns_b)
-        metodos = split_csv(self.payload.calculation_methods)
+        """Transforma el chunk vía motor híbrido Polars + UDF collaps_engine."""
+        from app.core.polars_transformer import transform_chunk_with_polars
 
-        logger.info(
-            "⚙️ [PYTHON - COLLAPS] Aplicando %d transformación(es) vía collaps_engine...",
-            len(metodos),
-        )
-
-        for pair_index, (col_a, col_b, method_raw) in enumerate(
-            zip(columnas_a, columnas_b, metodos)
-        ):
-            method_id, swap_operands, _method_label = self._resolve_method(method_raw)
-            col_a_key = f"{col_a}_a"
-            col_b_key = f"{col_b}_b"
-
-            if col_a_key not in result.columns or col_b_key not in result.columns:
-                raise KeyError(
-                    f"Columnas requeridas no encontradas en el resultado SQL: "
-                    f"'{col_a_key}' / '{col_b_key}'"
-                )
-
-            series_a, series_b = self._operand_series_pair(
-                result[col_a_key],
-                result[col_b_key],
-                swap_operands,
-            )
-            vectorized = self._vectorized_transformation_result(method_id, series_a, series_b)
-
-            if vectorized is not None:
-                result_values, match_values = vectorized
-                logger.debug(
-                    "⚙️ [PYTHON - COLLAPS] Par %d — método '%s' vectorizado",
-                    pair_index,
-                    method_id,
-                )
-            else:
-                result_values, match_values, errors = self._apply_transformation_via_apply(
-                    result,
-                    col_a_key,
-                    col_b_key,
-                    method_id,
-                    swap_operands,
-                )
-                for error_msg in errors:
-                    logger.warning(
-                        "⚠️ [PYTHON - COLLAPS] Error en %s para %s/%s: %s",
-                        method_id,
-                        col_a,
-                        col_b,
-                        error_msg,
-                    )
-
-            indexed_a = self._indexed_source_column_name(pair_index, col_a, "A")
-            indexed_b = self._indexed_source_column_name(pair_index, col_b, "B")
-            indexed_method = self._indexed_column_name(pair_index, "metodo_aplicado")
-            out_col = self._indexed_column_name(
-                pair_index,
-                self._result_suffix(method_raw, method_id),
-            )
-
-            result[indexed_a] = result[col_a_key]
-            result[indexed_b] = result[col_b_key]
-            result[indexed_method] = method_raw.strip()
-            result[out_col] = result_values
-
-            is_pure_boolean = method_id in _BOOLEAN_PURE_METHODS
-            if not is_pure_boolean and match_values.notna().any():
-                match_col = self._indexed_column_name(pair_index, "is_match")
-                result[match_col] = match_values
-
-            logger.info(
-                "⚙️ [PYTHON - COLLAPS] Par %d — método '%s' → columnas '%s', '%s', '%s'",
-                pair_index,
-                method_id,
-                indexed_a,
-                indexed_b,
-                out_col,
-            )
-
-        sql_source_columns = {
-            f"{col}_a" for col in columnas_a
-        } | {
-            f"{col}_b" for col in columnas_b
-        }
-        drop_columns = [col for col in sql_source_columns if col in result.columns]
-        if drop_columns:
-            result = result.drop(columns=drop_columns)
-
-        return result
+        return transform_chunk_with_polars(df, self)
 
     def _iter_analysis_chunks(
         self,

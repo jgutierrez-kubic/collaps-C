@@ -1,4 +1,5 @@
 import logging
+import re
 
 from app.models.payload import AnalysisPayload, _IDENTIFIER_RE, sanitize_table_identifier
 
@@ -7,18 +8,45 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "build_analysis_sql",
     "log_join_uniqueness_warning",
+    "sanitize_column_part",
     "sanitize_table_identifier",
     "split_csv",
+    "sql_source_column_alias",
 ]
-
 
 def split_csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def sanitize_column_part(part: str) -> str:
+    """Sanitiza una parte de nombre de columna SQL (alineado con AnalysisEngine)."""
+    clean = str(part).strip().lower().replace("/", "_").replace(" ", "_")
+    clean = re.sub(r"[^a-z0-9_]", "_", clean)
+    clean = re.sub(r"_+", "_", clean).strip("_")
+    if not clean:
+        raise ValueError(f"No se pudo sanitizar la parte de columna: '{part}'")
+    return clean
+
+
+def sql_source_column_alias(pair_index: int, col_name: str, side: str) -> str:
+    """Alias indexado emitido por build_analysis_sql: '{index}_{col}_{side}'."""
+    clean = sanitize_column_part(col_name)
+    return f"{pair_index}_{clean}_{side.lower()}"
+
+
+_ALIAS_RE = re.compile(r"^[a-zA-Z0-9_]+$")
+
+
 def _quote_ident(name: str) -> str:
     if not _IDENTIFIER_RE.match(name):
         raise ValueError(f"Identificador SQL inválido: '{name}'")
+    return f'"{name}"'
+
+
+def _quote_alias(name: str) -> str:
+    """Cita alias de columna (permite prefijo numérico indexado, ej. 0_val_a)."""
+    if not _ALIAS_RE.match(name):
+        raise ValueError(f"Alias SQL inválido: '{name}'")
     return f'"{name}"'
 
 
@@ -106,9 +134,11 @@ def build_analysis_sql(payload: AnalysisPayload) -> str:
         ),
     ]
 
-    for col_a, col_b in zip(columnas_a, columnas_b):
-        select_parts.append(f"a.{_quote_ident(col_a)} AS {_quote_ident(f'{col_a}_a')}")
-        select_parts.append(f"b.{_quote_ident(col_b)} AS {_quote_ident(f'{col_b}_b')}")
+    for pair_index, (col_a, col_b) in enumerate(zip(columnas_a, columnas_b)):
+        alias_a = sql_source_column_alias(pair_index, col_a, "a")
+        alias_b = sql_source_column_alias(pair_index, col_b, "b")
+        select_parts.append(f"a.{_quote_ident(col_a)} AS {_quote_alias(alias_a)}")
+        select_parts.append(f"b.{_quote_ident(col_b)} AS {_quote_alias(alias_b)}")
 
     select_clause = ",\n    ".join(select_parts)
 

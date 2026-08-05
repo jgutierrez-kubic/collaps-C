@@ -34,7 +34,7 @@ def test_analysis_payload_accepts_camel_case_json() -> None:
 def test_apply_collaps_transformations_legacy_diferencia() -> None:
     payload = AnalysisPayload.model_validate(_condenser_payload())
     engine = AnalysisEngine(payload)
-    df = pd.DataFrame({"cantidad_a": [10.0, 20.0], "cantidad_b": [10.0, 25.0]})
+    df = pd.DataFrame({"0_cantidad_a": [10.0, 20.0], "0_cantidad_b": [10.0, 25.0]})
 
     result = engine._apply_collaps_transformations(df)
 
@@ -43,7 +43,7 @@ def test_apply_collaps_transformations_legacy_diferencia() -> None:
     assert "0_metodo_aplicado" in result.columns
     assert "0_diferencia" in result.columns
     assert result["0_diferencia"].tolist() == [0.0, 5.0]
-    assert "cantidad_a" not in result.columns
+    assert "0_cantidad_a" not in result.columns
 
 
 def test_apply_collaps_transformations_vectorized_math_add() -> None:
@@ -51,7 +51,7 @@ def test_apply_collaps_transformations_vectorized_math_add() -> None:
         _condenser_payload(calculationMethods="math_add", targetTable="resultados")
     )
     engine = AnalysisEngine(payload)
-    df = pd.DataFrame({"cantidad_a": [10.0, 20.0, None], "cantidad_b": [5.0, 8.0, 3.0]})
+    df = pd.DataFrame({"0_cantidad_a": [10.0, 20.0, None], "0_cantidad_b": [5.0, 8.0, 3.0]})
 
     result = engine._apply_collaps_transformations(df)
 
@@ -71,7 +71,7 @@ def test_apply_collaps_transformations_registry_method() -> None:
         )
     )
     engine = AnalysisEngine(payload)
-    df = pd.DataFrame({"nombre_a": ["hola"], "nombre_b": ["hola"]})
+    df = pd.DataFrame({"0_nombre_a": ["hola"], "0_nombre_b": ["hola"]})
 
     result = engine._apply_collaps_transformations(df)
 
@@ -94,10 +94,10 @@ def test_apply_collaps_transformations_multiple_pairs_indexed() -> None:
     engine = AnalysisEngine(payload)
     df = pd.DataFrame(
         {
-            "nombre_a": ["a"],
-            "nombre_b": ["a"],
-            "cantidad_a": [10.0],
-            "cantidad_b": [12.0],
+            "0_nombre_a": ["a"],
+            "0_nombre_b": ["a"],
+            "1_cantidad_a": [10.0],
+            "1_cantidad_b": [12.0],
         }
     )
 
@@ -113,13 +113,40 @@ def test_apply_collaps_transformations_skips_is_match_for_pure_boolean() -> None
         _condenser_payload(calculationMethods="IGUALDAD", targetTable="resultados")
     )
     engine = AnalysisEngine(payload)
-    df = pd.DataFrame({"cantidad_a": [10.0, 20.0], "cantidad_b": [10.0, 25.0]})
+    df = pd.DataFrame({"0_cantidad_a": [10.0, 20.0], "0_cantidad_b": [10.0, 25.0]})
 
     result = engine._apply_collaps_transformations(df)
 
     assert "0_igualdad" in result.columns
     assert result["0_igualdad"].tolist() == [True, False]
     assert "0_is_match" not in result.columns
+
+
+def test_apply_collaps_transformations_duplicate_source_column() -> None:
+    payload = AnalysisPayload.model_validate(
+        _condenser_payload(
+            columnsA="val, val",
+            columnsB="val, val",
+            calculationMethods="math_add, math_sub",
+            targetTable="resultados",
+        )
+    )
+    engine = AnalysisEngine(payload)
+    df = pd.DataFrame(
+        {
+            "0_val_a": [10.0, 20.0],
+            "0_val_b": [5.0, 8.0],
+            "1_val_a": [3.0, 4.0],
+            "1_val_b": [1.0, 2.0],
+        }
+    )
+
+    result = engine._apply_collaps_transformations(df)
+
+    assert result["0_math_add"].tolist() == [15.0, 28.0]
+    assert result["1_math_sub"].tolist() == [2.0, 2.0]
+    assert "0_val_a" not in result.columns
+    assert "1_val_a" not in result.columns
 
 
 def test_merge_chunk_into_summary_accumulates_counts() -> None:
@@ -213,7 +240,7 @@ def test_auto_migrate_table_returns_true_when_columns_added(monkeypatch) -> None
 def test_persist_chunk_sets_update_schema_on_replace(monkeypatch) -> None:
     payload = AnalysisPayload.model_validate(_condenser_payload())
     engine = AnalysisEngine(payload)
-    df = pd.DataFrame({"cantidad_a": [1.0], "cantidad_b": [2.0]})
+    df = pd.DataFrame({"0_cantidad_a": [1.0], "0_cantidad_b": [2.0]})
 
     monkeypatch.setattr(AnalysisEngine, "_auto_migrate_table", lambda *_a, **_k: False)
 
