@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import os
-
 import pytest
+from fastapi.testclient import TestClient
 
 from app.core.catalyst.boveda_writer import compute_firma_auditoria
 from app.core.catalyst.cleanup import (
@@ -51,7 +50,36 @@ def test_catalyst_payload_accepts_camel_case() -> None:
     assert payload.resolve_tables().config_table == "a_2_config_ingesta_a"
 
 
-def test_table_contract_resolves_from_env_when_job_omits_tables(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_table_contract_uses_rms_defaults_without_job_or_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("CATALYST_CONFIG_TABLE", raising=False)
+    monkeypatch.delenv("CATALYST_BOVEDA_TABLE", raising=False)
+    monkeypatch.delenv("CATALYST_IDENTIDAD_TABLE", raising=False)
+
+    contract = CatalystTableContract.from_job_fields(
+        config_table=None,
+        boveda_table=None,
+        identidad_table=None,
+    )
+    assert contract.config_table == "a_2_config_ingesta_a"
+    assert contract.boveda_table == "a_3_boveda_kv"
+    assert contract.identidad_table == "a_2_identidad"
+
+
+def test_catalyst_payload_resolves_rms_defaults_when_tables_omitted() -> None:
+    payload = CatalystJobPayload.model_validate(
+        {
+            "source": "n8n",
+            "schemaName": "s99998_dev",
+            "sourceTable": "a_1_pma",
+        }
+    )
+    tables = payload.resolve_tables()
+    assert tables.config_table == "a_2_config_ingesta_a"
+
+
+def test_table_contract_env_overrides_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CATALYST_CONFIG_TABLE", "cfg_env")
     monkeypatch.setenv("CATALYST_BOVEDA_TABLE", "boveda_env")
     monkeypatch.setenv("CATALYST_IDENTIDAD_TABLE", "identidad_env")
@@ -64,25 +92,6 @@ def test_table_contract_resolves_from_env_when_job_omits_tables(monkeypatch: pyt
     assert contract.config_table == "cfg_env"
     assert contract.boveda_table == "boveda_env"
     assert contract.identidad_table == "identidad_env"
-
-
-def test_table_contract_requires_job_or_env() -> None:
-    env_backup = {
-        "CATALYST_CONFIG_TABLE": os.environ.pop("CATALYST_CONFIG_TABLE", None),
-        "CATALYST_BOVEDA_TABLE": os.environ.pop("CATALYST_BOVEDA_TABLE", None),
-        "CATALYST_IDENTIDAD_TABLE": os.environ.pop("CATALYST_IDENTIDAD_TABLE", None),
-    }
-    try:
-        with pytest.raises(ValueError, match="Nombre de tabla requerido"):
-            CatalystTableContract.from_job_fields(
-                config_table=None,
-                boveda_table=None,
-                identidad_table=None,
-            )
-    finally:
-        for key, value in env_backup.items():
-            if value is not None:
-                os.environ[key] = value
 
 
 def test_to_valor_original_preserves_raw_string() -> None:
@@ -218,3 +227,63 @@ def test_row_passes_acceptance_filter_requires_truthy_req_aceptado() -> None:
 def test_source_table_has_column_is_case_insensitive() -> None:
     assert source_table_has_column({"ID", "req_aceptado"}, "REQ_ACEPTADO") is True
     assert source_table_has_column({"id"}, "nombre") is False
+
+
+def test_catalyst_job_endpoint_returns_structured_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from main import app
+
+    class FailingEngine:
+        def __init__(self, payload: CatalystJobPayload) -> None:
+            raise RuntimeError("Tabla de configuración no encontrada")
+
+        def run(self, job_id: str | None = None) -> None:
+            return None
+
+    monkeypatch.setattr("app.api.catalyst_endpoints.CatalystEngine", FailingEngine)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/catalyst/job",
+        json={
+            "source": "n8n",
+            "schemaName": "s99998_dev",
+            "sourceTable": "a_1_pma",
+        },
+    )
+
+    body = response.json()
+    assert response.status_code == 400
+    assert body["status"] == "error"
+    assert body["errorType"] == "catalyst_job_rejected"
+    assert "Tabla de configuración no encontrada" in body["error"]
+    assert "jobId" in body
+
+
+def test_catalyst_job_endpoint_accepts_job_with_rms_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    from main import app
+
+    class NoopEngine:
+        def __init__(self, payload: CatalystJobPayload) -> None:
+            self.payload = payload
+
+        def run(self, job_id: str | None = None) -> None:
+            return None
+
+    monkeypatch.setattr("app.api.catalyst_endpoints.CatalystEngine", NoopEngine)
+
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/catalyst/job",
+        json={
+            "source": "n8n",
+            "schemaName": "s99998_dev",
+            "sourceTable": "a_1_pma",
+        },
+    )
+
+    body = response.json()
+    assert response.status_code == 202
+    assert body["status"] == "accepted"
+    assert body["configTable"] == "a_2_config_ingesta_a"
+    assert body["bovedaTable"] == "a_3_boveda_kv"
+    assert body["identidadTable"] == "a_2_identidad"

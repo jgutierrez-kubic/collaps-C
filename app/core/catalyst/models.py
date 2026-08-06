@@ -22,7 +22,9 @@ class ConfigRow:
             return default
 
         return cls(
-            columna_origen=str(pick("columna_origen", "columnaOrigen")).strip(),
+            columna_origen=str(
+                pick("columna_origen", "columnaOrigen", "propiedad")
+            ).strip(),
             tipo_dato_generico=str(
                 pick("tipo_dato_generico", "tipoDatoGenerico", default="texto")
             ).strip(),

@@ -16,6 +16,15 @@ def _quote_ident(name: str) -> str:
     return f'"{name}"'
 
 
+def _resolve_column_name(columns: set[str], *candidates: str) -> str | None:
+    lower_map = {name.lower(): name for name in columns}
+    for candidate in candidates:
+        match = lower_map.get(candidate.lower())
+        if match:
+            return match
+    return None
+
+
 def load_config_rows(
     schema_name: str,
     source_table: str,
@@ -30,27 +39,34 @@ def load_config_rows(
         raise RuntimeError(f"Tabla de configuración no encontrada: {schema_name}.{config_table}")
 
     columns = {col["name"] for col in inspector.get_columns(config_table, schema=schema_name)}
-    has_tabla_origen = "tabla_origen" in columns
+    columna_field = _resolve_column_name(columns, "columna_origen", "columnaOrigen", "propiedad")
+    if not columna_field:
+        raise RuntimeError(
+            f"La tabla {schema_name}.{config_table} no expone columna_origen/propiedad."
+        )
+
+    has_tabla_origen = _resolve_column_name(columns, "tabla_origen", "tablaOrigen") is not None
+    order_clause = f'ORDER BY {_quote_ident(columna_field)}'
 
     if has_tabla_origen:
         sql = text(
             f"SELECT * FROM {qualified} "
             "WHERE tabla_origen = :source_table "
-            "ORDER BY columna_origen"
+            f"{order_clause}"
         )
         params = {"source_table": source_table}
     else:
-        sql = text(f"SELECT * FROM {qualified} ORDER BY columna_origen")
+        sql = text(f"SELECT * FROM {qualified} {order_clause}")
         params = {}
 
     with engine.connect() as conn:
         rows = conn.execute(sql, params).mappings().all()
 
-    config_rows = [
-        ConfigRow.from_db_row(dict(row))
-        for row in rows
-        if row.get("columna_origen")
-    ]
+    config_rows: list[ConfigRow] = []
+    for row in rows:
+        config = ConfigRow.from_db_row(dict(row))
+        if config.columna_origen:
+            config_rows.append(config)
     if not config_rows:
         raise RuntimeError(
             f"No hay filas de configuración en {schema_name}.{config_table} "
