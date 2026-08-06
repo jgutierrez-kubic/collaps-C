@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
+from app.core.catalyst.catalyst_engine import CatalystEngine
 from app.core.catalyst.boveda_writer import compute_firma_auditoria
 from app.core.catalyst.cleanup import (
     is_empty_source_value,
@@ -24,7 +25,7 @@ from app.core.catalyst.identity import (
     resolve_row_identity,
 )
 from app.core.catalyst.models import ConfigRow
-from app.core.catalyst.table_contract import CatalystTableContract
+from app.core.catalyst.table_contract import CatalystTableContract, qualified_table
 from app.models.catalyst_payload import CatalystJobPayload
 
 TABLE_FIELDS = {
@@ -32,6 +33,35 @@ TABLE_FIELDS = {
     "bovedaTable": "a_3_boveda_kv",
     "identidadTable": "a_2_identidad",
 }
+
+
+def test_qualified_table_uses_schema_name_prefix() -> None:
+    assert qualified_table("s99998_dev", "a_2_identidad") == '"s99998_dev"."a_2_identidad"'
+
+
+def test_catalyst_callback_payload_includes_n8n_fields() -> None:
+    payload = CatalystJobPayload.model_validate(
+        {
+            "source": "n8n",
+            "schemaName": "s99998_dev",
+            "sourceTable": "a_1_pma",
+            "callbackUrl": "https://n8n.example.com/webhook/catalyst",
+            **TABLE_FIELDS,
+        }
+    )
+    engine = CatalystEngine(payload)
+    engine._job_id = "job-123"
+    engine._summary.filas_procesadas = 10
+
+    body = engine._build_callback_payload("success")
+
+    assert body["status"] == "success"
+    assert body["jobId"] == "job-123"
+    assert body["schemaName"] == "s99998_dev"
+    assert body["targetTable"] == "a_3_boveda_kv"
+    assert body["identidadTable"] == "a_2_identidad"
+    assert body["callbackUrl"] == "https://n8n.example.com/webhook/catalyst"
+    assert body["summary"]["filasProcesadas"] == 10
 
 
 def test_catalyst_payload_accepts_camel_case() -> None:

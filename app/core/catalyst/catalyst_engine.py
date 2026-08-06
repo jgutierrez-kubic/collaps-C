@@ -138,6 +138,7 @@ class CatalystEngine:
             entidad_interna_id=identity.entidad_interna_id,
             llave_humana_completa=identity.llave_humana_completa,
             tabla_origen=self.payload.source_table,
+            job_id=job_id,
         )
 
         for config in persist_columns:
@@ -178,22 +179,28 @@ class CatalystEngine:
             response = client.post(callback_url, json=body)
             response.raise_for_status()
 
+    def _build_callback_payload(self, status: str) -> dict[str, Any]:
+        """JSON de respuesta para callbackUrl (n8n / Cloud Run)."""
+        return {
+            "status": status,
+            "jobId": self._job_id,
+            "schemaName": self.payload.schema_name,
+            "sourceTable": self.payload.source_table,
+            "targetTable": self.tables.boveda_table,
+            "configTable": self.tables.config_table,
+            "bovedaTable": self.tables.boveda_table,
+            "identidadTable": self.tables.identidad_table,
+            "callbackUrl": self.payload.callback_url,
+            "summary": self._summary.to_callback_dict(),
+        }
+
     def _send_callback(self, status: str) -> None:
         callback_url = self.payload.callback_url
         if not callback_url or not callback_url.startswith(("http://", "https://")):
             logger.info("Callback Catalyst omitido — URL no válida o vacía: %s", callback_url)
             return
 
-        body: dict[str, Any] = {
-            "status": status,
-            "schema": self.payload.schema_name,
-            "sourceTable": self.payload.source_table,
-            "configTable": self.tables.config_table,
-            "bovedaTable": self.tables.boveda_table,
-            "identidadTable": self.tables.identidad_table,
-            "jobId": self._job_id,
-            "summary": self._summary.to_callback_dict(),
-        }
+        body = self._build_callback_payload(status)
 
         try:
             self._execute_http_callback(callback_url, body)
@@ -228,6 +235,7 @@ class CatalystEngine:
             self.tables.identidad_table,
         )
 
+        callback_status = "failed"
         try:
             config_rows = load_config_rows(
                 self.payload.schema_name,
@@ -265,7 +273,7 @@ class CatalystEngine:
                         logger.error("❌ [CATALYST] %s", message, exc_info=True)
                         self._summary.errores.append(message)
 
-            self._send_callback("success")
+            callback_status = "success"
             elapsed = time.perf_counter() - started_at
             logger.info(
                 "✅ [CATALYST DONE] %.2fs — job_id=%s, filas=%d, omitidas=%d, insertados=%d, "
@@ -289,6 +297,7 @@ class CatalystEngine:
                 exc,
                 exc_info=True,
             )
-            self._send_callback("failed")
+        finally:
+            self._send_callback(callback_status)
 
         return self._summary

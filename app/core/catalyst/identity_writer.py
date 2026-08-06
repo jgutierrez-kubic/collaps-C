@@ -7,31 +7,71 @@ from datetime import datetime, timezone
 
 from sqlalchemy import inspect, text
 
-from app.core.catalyst.table_contract import table_index_suffix
+from app.core.catalyst.table_contract import qualified_table, table_index_suffix
 from app.core.db import get_db_engine
 
 logger = logging.getLogger(__name__)
 
+_REQUIRED_IDENTIDAD_COLUMNS: dict[str, str] = {
+    "llave_humana_completa": "TEXT NOT NULL DEFAULT ''",
+    "tabla_origen": "TEXT NOT NULL DEFAULT ''",
+    "actualizado_en": "TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+    "job_id": "TEXT",
+}
 
-def _quote_ident(name: str) -> str:
-    return f'"{name}"'
+
+def _ensure_identidad_columns(schema_name: str, identidad_table: str) -> None:
+    """Alinea columnas del modelo RMS en tablas de identidad existentes."""
+    engine = get_db_engine()
+    inspector = inspect(engine)
+    if not inspector.has_table(identidad_table, schema=schema_name):
+        return
+
+    existing = {
+        col["name"] for col in inspector.get_columns(identidad_table, schema=schema_name)
+    }
+    qualified = qualified_table(schema_name, identidad_table)
+    missing = {
+        name: ddl
+        for name, ddl in _REQUIRED_IDENTIDAD_COLUMNS.items()
+        if name not in existing
+    }
+    if not missing:
+        return
+
+    with engine.begin() as conn:
+        for column, column_type in missing.items():
+            ddl = (
+                f"ALTER TABLE {qualified} "
+                f'ADD COLUMN IF NOT EXISTS "{column}" {column_type}'
+            )
+            conn.execute(text(ddl))
+
+    logger.info(
+        "🛠️ [CATALYST] Columnas identidad alineadas en %s.%s: %s",
+        schema_name,
+        identidad_table,
+        ", ".join(missing),
+    )
 
 
 def ensure_identidad_table(schema_name: str, identidad_table: str) -> None:
-    """Crea la tabla de identidad si no existe."""
+    """Crea o alinea la tabla de identidad en el schema del job."""
     engine = get_db_engine()
     inspector = inspect(engine)
     if inspector.has_table(identidad_table, schema=schema_name):
+        _ensure_identidad_columns(schema_name, identidad_table)
         return
 
     index_suffix = table_index_suffix(identidad_table)
-    qualified = f"{_quote_ident(schema_name)}.{_quote_ident(identidad_table)}"
+    qualified = qualified_table(schema_name, identidad_table)
     ddl = f"""
     CREATE TABLE IF NOT EXISTS {qualified} (
         entidad_interna_id TEXT PRIMARY KEY,
         llave_humana_completa TEXT NOT NULL,
         tabla_origen TEXT NOT NULL,
-        actualizado_en TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        actualizado_en TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        job_id TEXT
     )
     """
     index_llave = f"""
@@ -58,7 +98,7 @@ def lookup_entidad_interna_id(
     if not inspector.has_table(identidad_table, schema=schema_name):
         return None
 
-    qualified = f"{_quote_ident(schema_name)}.{_quote_ident(identidad_table)}"
+    qualified = qualified_table(schema_name, identidad_table)
     sql = text(
         f"SELECT entidad_interna_id FROM {qualified} "
         "WHERE llave_humana_completa = :llave_humana_completa "
@@ -83,18 +123,21 @@ def upsert_identidad(
     entidad_interna_id: str,
     llave_humana_completa: str,
     tabla_origen: str,
+    job_id: str,
 ) -> None:
-    """Persiste o actualiza la relación UUID <-> llave humana completa."""
-    qualified = f"{_quote_ident(schema_name)}.{_quote_ident(identidad_table)}"
+    """Persiste identidad con actualizado_en y job_id de la ejecución actual."""
+    qualified = qualified_table(schema_name, identidad_table)
     now = datetime.now(timezone.utc)
     sql = text(
         f"INSERT INTO {qualified} "
-        "(entidad_interna_id, llave_humana_completa, tabla_origen, actualizado_en) "
-        "VALUES (:entidad_interna_id, :llave_humana_completa, :tabla_origen, :actualizado_en) "
+        "(entidad_interna_id, llave_humana_completa, tabla_origen, actualizado_en, job_id) "
+        "VALUES (:entidad_interna_id, :llave_humana_completa, :tabla_origen, "
+        ":actualizado_en, :job_id) "
         "ON CONFLICT (entidad_interna_id) DO UPDATE SET "
         "llave_humana_completa = EXCLUDED.llave_humana_completa, "
         "tabla_origen = EXCLUDED.tabla_origen, "
-        "actualizado_en = EXCLUDED.actualizado_en"
+        "actualizado_en = EXCLUDED.actualizado_en, "
+        "job_id = EXCLUDED.job_id"
     )
 
     with get_db_engine().begin() as conn:
@@ -105,5 +148,6 @@ def upsert_identidad(
                 "llave_humana_completa": llave_humana_completa,
                 "tabla_origen": tabla_origen,
                 "actualizado_en": now,
+                "job_id": job_id,
             },
         )

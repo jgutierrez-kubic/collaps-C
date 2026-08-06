@@ -11,7 +11,7 @@ from sqlalchemy import inspect, text
 
 from app.core.catalyst.cleanup import canonical_string
 from app.core.catalyst.models import JobSummary
-from app.core.catalyst.table_contract import table_index_suffix
+from app.core.catalyst.table_contract import qualified_table, table_index_suffix
 from app.core.db import get_db_engine
 
 logger = logging.getLogger(__name__)
@@ -34,6 +34,10 @@ def _quote_ident(name: str) -> str:
     return f'"{name}"'
 
 
+def _qualified(schema_name: str, table_name: str) -> str:
+    return qualified_table(schema_name, table_name)
+
+
 def compute_firma_auditoria(valor_limpio: str | None) -> str:
     """Hash SHA-256 del valor_limpio (NULL → firma de cadena vacía)."""
     payload = canonical_string(valor_limpio).encode("utf-8")
@@ -48,7 +52,7 @@ def _ensure_boveda_columns(schema_name: str, boveda_table: str) -> None:
         return
 
     existing = {col["name"] for col in inspector.get_columns(boveda_table, schema=schema_name)}
-    qualified = f"{_quote_ident(schema_name)}.{_quote_ident(boveda_table)}"
+    qualified = _qualified(schema_name, boveda_table)
     missing = {
         name: ddl
         for name, ddl in _REQUIRED_BOVEDA_COLUMNS.items()
@@ -82,7 +86,7 @@ def ensure_boveda_table(schema_name: str, boveda_table: str) -> None:
         return
 
     index_suffix = table_index_suffix(boveda_table)
-    qualified = f"{_quote_ident(schema_name)}.{_quote_ident(boveda_table)}"
+    qualified = _qualified(schema_name, boveda_table)
     ddl = f"""
     CREATE TABLE IF NOT EXISTS {qualified} (
         id BIGSERIAL PRIMARY KEY,
@@ -127,7 +131,7 @@ def upsert_boveda_record(
 ) -> None:
     """SCD2 inmutable: cierra versión anterior si cambió firma_auditoria."""
     engine = get_db_engine()
-    qualified = f"{_quote_ident(schema_name)}.{_quote_ident(boveda_table)}"
+    qualified = _qualified(schema_name, boveda_table)
     now = datetime.now(timezone.utc)
 
     select_sql = text(

@@ -18,6 +18,11 @@ RMS_V14_ENV_DEFAULTS: dict[str, str] = {
 }
 
 
+def qualified_table(schema_name: str, table_name: str) -> str:
+    """Califica tabla con schemaName del job: \"{schema}\".\"{table}\"."""
+    return f'"{schema_name}"."{table_name}"'
+
+
 def table_index_suffix(table_name: str) -> str:
     return _INDEX_SUFFIX_RE.sub("_", table_name).strip("_")
 
