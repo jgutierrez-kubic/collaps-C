@@ -1,4 +1,4 @@
-"""Gestión de identidad RMS — entidad_interna_id determinístico por es_llave."""
+"""Gestión de identidad RMS — entidad_interna_id con lookup en tabla de identidad."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.core.catalyst.governance import SOURCE_ID_COLUMN
+from app.core.catalyst.identity_writer import lookup_entidad_interna_id
 from app.core.catalyst.models import ConfigRow
 
 CATALYST_NAMESPACE = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
@@ -14,7 +15,7 @@ CATALYST_NAMESPACE = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
 
 @dataclass(frozen=True)
 class RowIdentity:
-    """Identidad de fila para bóveda SCD2 y registro en a_2_identidad."""
+    """Identidad de fila para bóveda SCD2 y registro en tabla de identidad."""
 
     entidad_interna_id: str
     llave_humana_completa: str
@@ -43,8 +44,12 @@ def resolve_row_identity(
     row: dict[str, Any],
     key_columns: list[ConfigRow],
     separador_llave: str,
+    *,
+    schema_name: str,
+    identidad_table: str,
+    tabla_origen: str,
 ) -> RowIdentity:
-    """Genera entidad_interna_id y llave_humana_completa desde columnas es_llave."""
+    """Resuelve identidad: recupera UUID existente o genera uno nuevo."""
     if key_columns:
         llave_humana_completa = build_llave_humana_completa(row, key_columns, separador_llave)
     else:
@@ -56,7 +61,15 @@ def resolve_row_identity(
             )
         llave_humana_completa = f"ANCLA:{row_id}"
 
+    existing_id = lookup_entidad_interna_id(
+        schema_name,
+        identidad_table,
+        llave_humana_completa=llave_humana_completa,
+        tabla_origen=tabla_origen,
+    )
+    entidad_interna_id = existing_id or build_entidad_interna_id(llave_humana_completa)
+
     return RowIdentity(
-        entidad_interna_id=build_entidad_interna_id(llave_humana_completa),
+        entidad_interna_id=entidad_interna_id,
         llave_humana_completa=llave_humana_completa,
     )

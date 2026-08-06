@@ -6,7 +6,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class ConfigRow:
-    """Fila de mapeo leída desde a_2_config_ingesta_a (RMS Genérico v1.4)."""
+    """Fila de mapeo leída desde la tabla de configuración de ingesta (RMS Genérico v1.4)."""
 
     columna_origen: str
     tipo_dato_generico: str

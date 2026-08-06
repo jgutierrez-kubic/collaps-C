@@ -3,6 +3,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
 
+from app.core.catalyst.table_contract import CatalystTableContract
 from app.models.payload import DEFAULT_SCHEMA_NAME, _IDENTIFIER_RE, sanitize_table_identifier
 
 DEFAULT_SEPARADOR_LLAVE = "|"
@@ -21,6 +22,18 @@ class CatalystJobPayload(BaseModel):
     source: Literal["directus", "n8n"] = "n8n"
     schema_name: str = DEFAULT_SCHEMA_NAME
     source_table: str = Field(description="Tabla origen ancha (a_1) a refinar")
+    config_table: Optional[str] = Field(
+        default=None,
+        description="Tabla de reglas de ingesta (resuelta vía job o CATALYST_CONFIG_TABLE)",
+    )
+    boveda_table: Optional[str] = Field(
+        default=None,
+        description="Tabla bóveda KV SCD2 (resuelta vía job o CATALYST_BOVEDA_TABLE)",
+    )
+    identidad_table: Optional[str] = Field(
+        default=None,
+        description="Tabla de identidad UUID (resuelta vía job o CATALYST_IDENTIDAD_TABLE)",
+    )
     callback_url: Optional[str] = None
     separador_llave: str = Field(
         default=DEFAULT_SEPARADOR_LLAVE,
@@ -50,9 +63,25 @@ class CatalystJobPayload(BaseModel):
             raise ValueError("source_table is required.")
         return sanitize_table_identifier(str(value))
 
+    @field_validator("config_table", "boveda_table", "identidad_table", mode="before")
+    @classmethod
+    def sanitize_optional_table_names(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        return sanitize_table_identifier(str(value))
+
     @field_validator("separador_llave")
     @classmethod
     def validate_separador_llave(cls, value: str) -> str:
         if not value:
             raise ValueError("separador_llave cannot be empty.")
         return value
+
+    def resolve_tables(self) -> CatalystTableContract:
+        return CatalystTableContract.from_job_fields(
+            config_table=self.config_table,
+            boveda_table=self.boveda_table,
+            identidad_table=self.identidad_table,
+        )

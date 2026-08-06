@@ -19,7 +19,6 @@ from app.core.analysis_engine import (
     _log_callback_retry,
 )
 from app.core.catalyst.boveda_writer import (
-    BOVEDA_TABLE,
     compute_firma_auditoria,
     ensure_boveda_table,
     upsert_boveda_record,
@@ -46,6 +45,7 @@ SQL_CHUNK_SIZE = int(os.getenv("SQL_CHUNK_SIZE", "10000"))
 class CatalystEngine:
     def __init__(self, payload: CatalystJobPayload) -> None:
         self.payload = payload
+        self.tables = payload.resolve_tables()
         self._job_id: str | None = None
         self._summary = JobSummary()
         self._has_req_aceptado = False
@@ -127,10 +127,14 @@ class CatalystEngine:
             row,
             key_columns,
             self.payload.separador_llave,
+            schema_name=self.payload.schema_name,
+            identidad_table=self.tables.identidad_table,
+            tabla_origen=self.payload.source_table,
         )
 
         upsert_identidad(
             self.payload.schema_name,
+            self.tables.identidad_table,
             entidad_interna_id=identity.entidad_interna_id,
             llave_humana_completa=identity.llave_humana_completa,
             tabla_origen=self.payload.source_table,
@@ -149,6 +153,7 @@ class CatalystEngine:
 
             upsert_boveda_record(
                 self.payload.schema_name,
+                self.tables.boveda_table,
                 entidad_interna_id=identity.entidad_interna_id,
                 propiedad_origen=config.columna_origen,
                 valor_original=valor_original,
@@ -183,7 +188,9 @@ class CatalystEngine:
             "status": status,
             "schema": self.payload.schema_name,
             "sourceTable": self.payload.source_table,
-            "targetTable": BOVEDA_TABLE,
+            "configTable": self.tables.config_table,
+            "bovedaTable": self.tables.boveda_table,
+            "identidadTable": self.tables.identidad_table,
             "jobId": self._job_id,
             "summary": self._summary.to_callback_dict(),
         }
@@ -212,14 +219,21 @@ class CatalystEngine:
         started_at = time.perf_counter()
 
         logger.info(
-            "🧪 [CATALYST START] job_id=%s, schema=%s, source=%s",
+            "🧪 [CATALYST START] job_id=%s, schema=%s, source=%s, config=%s, boveda=%s, identidad=%s",
             job_id,
             self.payload.schema_name,
             self.payload.source_table,
+            self.tables.config_table,
+            self.tables.boveda_table,
+            self.tables.identidad_table,
         )
 
         try:
-            config_rows = load_config_rows(self.payload.schema_name, self.payload.source_table)
+            config_rows = load_config_rows(
+                self.payload.schema_name,
+                self.payload.source_table,
+                self.tables.config_table,
+            )
             key_columns = [row for row in config_rows if row.es_llave]
             persist_columns = config_rows
 
@@ -231,8 +245,8 @@ class CatalystEngine:
                     self._summary.filas_omitidas,
                 )
 
-            ensure_boveda_table(self.payload.schema_name)
-            ensure_identidad_table(self.payload.schema_name)
+            ensure_boveda_table(self.payload.schema_name, self.tables.boveda_table)
+            ensure_identidad_table(self.payload.schema_name, self.tables.identidad_table)
 
             for chunk in self._iter_source_chunks():
                 for record in chunk.to_dict(orient="records"):
