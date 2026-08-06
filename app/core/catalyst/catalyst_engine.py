@@ -1,4 +1,4 @@
-"""Orquestador principal del refiner Catalyst (COLLAPS v1.3)."""
+"""Orquestador principal del refiner Catalyst (RMS Genérico v1.4)."""
 
 from __future__ import annotations
 
@@ -20,12 +20,11 @@ from app.core.analysis_engine import (
 )
 from app.core.catalyst.boveda_writer import (
     BOVEDA_TABLE,
-    compute_firma_valor,
+    compute_firma_auditoria,
     ensure_boveda_table,
     upsert_boveda_record,
 )
-from app.core.catalyst.canonical import build_cinco_casillas
-from app.core.catalyst.cleanup import clean_value
+from app.core.catalyst.cleanup import to_valor_limpio, to_valor_original
 from app.core.catalyst.config_reader import load_config_rows
 from app.core.catalyst.governance import (
     REQ_ACEPTADO_COLUMN,
@@ -33,6 +32,7 @@ from app.core.catalyst.governance import (
     source_table_has_column,
 )
 from app.core.catalyst.identity import resolve_row_identity
+from app.core.catalyst.identity_writer import ensure_identidad_table, upsert_identidad
 from app.core.catalyst.models import ConfigRow, JobSummary
 from app.core.config import DB_URL
 from app.core.db import get_db_engine
@@ -48,16 +48,10 @@ class CatalystEngine:
         self.payload = payload
         self._job_id: str | None = None
         self._summary = JobSummary()
+        self._has_req_aceptado = False
 
     def _quote_ident(self, name: str) -> str:
         return f'"{name}"'
-
-    def __init__(self, payload: CatalystJobPayload) -> None:
-        self.payload = payload
-        self._job_id: str | None = None
-        self._summary = JobSummary()
-        self._has_req_aceptado = False
-        self._use_ancla_lookup = False
 
     def _inspect_source_table(self) -> None:
         inspector = inspect(get_db_engine())
@@ -91,7 +85,7 @@ class CatalystEngine:
         qualified = f"{self._quote_ident(schema_name)}.{self._quote_ident(source_table)}"
         where_clause = ""
         if self._has_req_aceptado:
-            where_clause = f" WHERE {_quote_ident(REQ_ACEPTADO_COLUMN)} IS TRUE"
+            where_clause = f" WHERE {self._quote_ident(REQ_ACEPTADO_COLUMN)} IS TRUE"
 
         engine = get_db_engine()
         offset = 0
@@ -135,33 +129,35 @@ class CatalystEngine:
             self.payload.separador_llave,
         )
 
+        upsert_identidad(
+            self.payload.schema_name,
+            entidad_interna_id=identity.entidad_interna_id,
+            llave_humana_completa=identity.llave_humana_completa,
+            tabla_origen=self.payload.source_table,
+        )
+
         for config in persist_columns:
             if not config.guardar:
                 continue
-            if config.propiedad not in row:
+            if config.columna_origen not in row:
                 continue
 
-            valor_limpio = clean_value(row.get(config.propiedad), config)
-            firma = compute_firma_valor(valor_limpio)
-            traduccion = (
-                build_cinco_casillas(config, valor_limpio)
-                if config.rol == "requisito"
-                else None
-            )
+            raw_value = row.get(config.columna_origen)
+            valor_original = to_valor_original(raw_value)
+            valor_limpio = to_valor_limpio(raw_value, config.tipo_dato_generico)
+            firma = compute_firma_auditoria(valor_limpio)
 
             upsert_boveda_record(
                 self.payload.schema_name,
-                clave_cotejo=identity.clave_cotejo,
-                propiedad=config.propiedad,
-                valor=valor_limpio,
-                firma_valor=firma,
-                traduccion_canonica=traduccion,
-                rol=config.rol,
-                ancla_origen=identity.ancla_origen,
-                source_table=self.payload.source_table,
+                entidad_interna_id=identity.entidad_interna_id,
+                propiedad_origen=config.columna_origen,
+                valor_original=valor_original,
+                valor_limpio=valor_limpio,
+                firma_auditoria=firma,
+                tipo_dato_generico=config.tipo_dato_generico,
+                tabla_origen=self.payload.source_table,
                 job_id=job_id,
                 summary=self._summary,
-                use_ancla_lookup=self._use_ancla_lookup,
             )
 
     @staticmethod
@@ -224,9 +220,8 @@ class CatalystEngine:
 
         try:
             config_rows = load_config_rows(self.payload.schema_name, self.payload.source_table)
-            key_columns = [row for row in config_rows if row.rol == "llave_humana"]
-            persist_columns = [row for row in config_rows if row.guardar]
-            self._use_ancla_lookup = not key_columns
+            key_columns = [row for row in config_rows if row.es_llave]
+            persist_columns = config_rows
 
             self._inspect_source_table()
             if self._has_req_aceptado:
@@ -237,6 +232,7 @@ class CatalystEngine:
                 )
 
             ensure_boveda_table(self.payload.schema_name)
+            ensure_identidad_table(self.payload.schema_name)
 
             for chunk in self._iter_source_chunks():
                 for record in chunk.to_dict(orient="records"):

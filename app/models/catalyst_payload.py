@@ -9,7 +9,7 @@ DEFAULT_SEPARADOR_LLAVE = "|"
 
 
 class CatalystJobPayload(BaseModel):
-    """Payload para el job asíncrono del refiner Catalyst (COLLAPS v1.3)."""
+    """Payload para el job asíncrono del refiner Catalyst (RMS Genérico v1.4)."""
 
     model_config = ConfigDict(
         alias_generator=to_camel,
@@ -24,7 +24,7 @@ class CatalystJobPayload(BaseModel):
     callback_url: Optional[str] = None
     separador_llave: str = Field(
         default=DEFAULT_SEPARADOR_LLAVE,
-        description="Separador para concatenar columnas llave_humana (D01/D06)",
+        description="Separador para material de llave compuesta (es_llave)",
     )
 
     @field_validator("schema_name", mode="before")

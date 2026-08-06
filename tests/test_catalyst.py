@@ -1,16 +1,24 @@
-"""Tests del módulo Catalyst (COLLAPS v1.3)."""
+"""Tests del módulo Catalyst (RMS Genérico v1.4)."""
 
 from __future__ import annotations
 
-from app.core.catalyst.boveda_writer import compute_firma_valor
-from app.core.catalyst.canonical import build_cinco_casillas
-from app.core.catalyst.cleanup import clean_value
+from app.core.catalyst.boveda_writer import compute_firma_auditoria
+from app.core.catalyst.cleanup import (
+    normalize_numeric_string,
+    normalize_text_string,
+    to_valor_limpio,
+    to_valor_original,
+)
 from app.core.catalyst.governance import (
     is_req_aceptado,
     row_passes_acceptance_filter,
     source_table_has_column,
 )
-from app.core.catalyst.identity import aggressive_normalize, build_clave_cotejo, resolve_row_identity
+from app.core.catalyst.identity import (
+    build_entidad_interna_id,
+    build_llave_humana_completa,
+    resolve_row_identity,
+)
 from app.core.catalyst.models import ConfigRow
 from app.models.catalyst_payload import CatalystJobPayload
 
@@ -30,73 +38,57 @@ def test_catalyst_payload_accepts_camel_case() -> None:
     assert payload.separador_llave == "|"
 
 
-def test_aggressive_normalize_strips_accents_and_spaces() -> None:
-    assert aggressive_normalize("  Café de Ñoño  ") == "CAFEDENONO"
+def test_to_valor_original_preserves_raw_string() -> None:
+    assert to_valor_original(" 12,5 m² ") == " 12,5 m² "
+    assert to_valor_original(None) == ""
 
 
-def test_build_clave_cotejo_concatenates_ordered_keys() -> None:
+def test_to_valor_limpio_normalizes_numeric_and_text_types() -> None:
+    assert to_valor_limpio("12,5 m²", "superficie") == "12.5"
+    assert to_valor_limpio("1.234,56", "numero") == "1.234.56"
+    assert to_valor_limpio("  texto   con   espacios  ", "texto") == "texto con espacios"
+
+
+def test_normalize_numeric_string_extracts_digits_and_signs() -> None:
+    assert normalize_numeric_string("abc-12,34xyz") == "-12.34"
+
+
+def test_normalize_text_string_collapses_whitespace() -> None:
+    assert normalize_text_string("  hola   mundo  ") == "hola mundo"
+
+
+def test_compute_firma_auditoria_is_stable() -> None:
+    assert compute_firma_auditoria("12.5") == compute_firma_auditoria("12.5")
+    assert compute_firma_auditoria("12.5") != compute_firma_auditoria("12.6")
+
+
+def test_build_llave_humana_completa_concatenates_key_columns() -> None:
     row = {"codigo": "P-001", "zona": "Norte"}
     keys = [
-        ConfigRow(
-            propiedad="zona",
-            rol="llave_humana",
-            orden_llave=2,
-            formato_entrada="texto",
-            regla_limpieza="",
-            unidad_esperada="",
-            parametro="",
-            guardar=True,
-        ),
-        ConfigRow(
-            propiedad="codigo",
-            rol="llave_humana",
-            orden_llave=1,
-            formato_entrada="texto",
-            regla_limpieza="",
-            unidad_esperada="",
-            parametro="",
-            guardar=True,
-        ),
+        ConfigRow("zona", "texto", True, True),
+        ConfigRow("codigo", "texto", True, True),
     ]
-    assert build_clave_cotejo(row, keys, "|") == "P-001|NORTE"
+    assert build_llave_humana_completa(row, keys, "|") == "P-001|Norte"
 
 
-def test_compute_firma_valor_is_stable() -> None:
-    assert compute_firma_valor("hola") == compute_firma_valor("hola")
-    assert compute_firma_valor("hola") != compute_firma_valor("hola!")
+def test_build_entidad_interna_id_is_deterministic() -> None:
+    first = build_entidad_interna_id("Norte|P-001")
+    second = build_entidad_interna_id("Norte|P-001")
+    assert first == second
+    assert first != build_entidad_interna_id("Sur|P-001")
 
 
-def test_build_cinco_casillas_for_requisito() -> None:
-    config = ConfigRow(
-        propiedad="espesor",
-        rol="requisito",
-        orden_llave=0,
-        formato_entrada="numero",
-        regla_limpieza="",
-        unidad_esperada="mm",
-        parametro="min=10",
-        guardar=True,
-    )
-    casillas = build_cinco_casillas(config, 12.5)
-    assert casillas["casilla_1_clave"] == "espesor"
-    assert casillas["casilla_2_valor"] == 12.5
-    assert casillas["casilla_3_unidad"] == "mm"
-    assert casillas["casilla_4_formato"] == "numero"
-    assert casillas["casilla_5_parametro"] == "min=10"
+def test_resolve_row_identity_from_es_llave_columns() -> None:
+    keys = [ConfigRow("codigo", "texto", True, True)]
+    identity = resolve_row_identity({"id": 99, "codigo": "ABC"}, keys, "|")
+    assert identity.llave_humana_completa == "ABC"
+    assert identity.entidad_interna_id == build_entidad_interna_id("ABC")
 
 
-def test_clean_value_coerces_numero() -> None:
-    config = ConfigRow(
-        propiedad="cantidad",
-        rol="valor",
-        orden_llave=0,
-        formato_entrada="numero",
-        regla_limpieza="",
-        unidad_esperada="",
-        parametro="",
-        guardar=True,
-    )
-    assert clean_value("12,5", config) == 12.5
+def test_resolve_row_identity_falls_back_to_row_id() -> None:
+    identity = resolve_row_identity({"id": 42, "nombre": "foo"}, [], "|")
+    assert identity.llave_humana_completa == "ANCLA:42"
+    assert identity.entidad_interna_id == build_entidad_interna_id("ANCLA:42")
 
 
 def test_is_req_aceptado_accepts_common_truthy_values() -> None:
@@ -121,27 +113,3 @@ def test_row_passes_acceptance_filter_requires_truthy_req_aceptado() -> None:
 def test_source_table_has_column_is_case_insensitive() -> None:
     assert source_table_has_column({"ID", "req_aceptado"}, "REQ_ACEPTADO") is True
     assert source_table_has_column({"id"}, "nombre") is False
-
-
-def test_resolve_row_identity_uses_ancla_when_no_llave_humana() -> None:
-    identity = resolve_row_identity({"id": 42, "nombre": "foo"}, [], "|")
-    assert identity.ancla_origen == "42"
-    assert identity.clave_cotejo == "ANCLA:42"
-
-
-def test_resolve_row_identity_prefers_llave_humana_when_present() -> None:
-    keys = [
-        ConfigRow(
-            propiedad="codigo",
-            rol="llave_humana",
-            orden_llave=1,
-            formato_entrada="texto",
-            regla_limpieza="",
-            unidad_esperada="",
-            parametro="",
-            guardar=True,
-        )
-    ]
-    identity = resolve_row_identity({"id": 99, "codigo": "ABC"}, keys, "|")
-    assert identity.clave_cotejo == "ABC"
-    assert identity.ancla_origen == "99"

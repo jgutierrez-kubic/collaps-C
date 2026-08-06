@@ -6,15 +6,11 @@ from typing import Any
 
 @dataclass(frozen=True)
 class ConfigRow:
-    """Fila de mapeo leída desde a_2_config."""
+    """Fila de mapeo leída desde a_2_config_ingesta_a (RMS Genérico v1.4)."""
 
-    propiedad: str
-    rol: str
-    orden_llave: int
-    formato_entrada: str
-    regla_limpieza: str
-    unidad_esperada: str
-    parametro: str
+    columna_origen: str
+    tipo_dato_generico: str
+    es_llave: bool
     guardar: bool
 
     @classmethod
@@ -26,13 +22,11 @@ class ConfigRow:
             return default
 
         return cls(
-            propiedad=str(pick("propiedad")).strip(),
-            rol=str(pick("rol", default="atributo")).strip(),
-            orden_llave=int(pick("orden_llave", "ordenLlave", default=0) or 0),
-            formato_entrada=str(pick("formato_entrada", "formatoEntrada", default="texto")).strip(),
-            regla_limpieza=str(pick("regla_limpieza", "reglaLimpieza", default="")).strip(),
-            unidad_esperada=str(pick("unidad_esperada", "unidadEsperada", default="")).strip(),
-            parametro=str(pick("parametro", default="")).strip(),
+            columna_origen=str(pick("columna_origen", "columnaOrigen")).strip(),
+            tipo_dato_generico=str(
+                pick("tipo_dato_generico", "tipoDatoGenerico", default="texto")
+            ).strip(),
+            es_llave=bool(pick("es_llave", "esLlave", default=False)),
             guardar=bool(pick("guardar", default=True)),
         )
 

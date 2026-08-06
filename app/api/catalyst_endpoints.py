@@ -12,13 +12,13 @@ router = APIRouter(prefix="/api/v1/catalyst", tags=["catalyst"])
 @router.post(
     "/job",
     status_code=status.HTTP_202_ACCEPTED,
-    summary="Encolar job Catalyst (refiner COLLAPS v1.3)",
+    summary="Encolar job Catalyst (refiner RMS Genérico v1.4)",
 )
 async def create_catalyst_job(
     payload: CatalystJobPayload,
     background_tasks: BackgroundTasks,
 ) -> JSONResponse:
-    """Refina tabla origen (a_1) hacia bóveda KV (a_3_boveda_kv) según a_2_config."""
+    """Refina tabla origen (a_1) hacia bóveda KV (a_3_boveda_kv) según a_2_config_ingesta_a."""
     job_id = str(uuid4())
     engine = CatalystEngine(payload)
     background_tasks.add_task(engine.run, job_id)

@@ -1,9 +1,8 @@
-"""Escritura SCD2 en a_3_boveda_kv con idempotencia D11 (firma_valor)."""
+"""Escritura SCD2 en a_3_boveda_kv con firma_auditoria (RMS Genérico v1.4)."""
 
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -19,14 +18,13 @@ logger = logging.getLogger(__name__)
 BOVEDA_TABLE = "a_3_boveda_kv"
 
 _REQUIRED_BOVEDA_COLUMNS: dict[str, str] = {
-    "clave_cotejo": "TEXT NOT NULL DEFAULT ''",
-    "propiedad": "TEXT NOT NULL DEFAULT ''",
-    "valor": "TEXT",
-    "firma_valor": "TEXT NOT NULL DEFAULT ''",
-    "traduccion_canonica": "JSONB",
-    "rol": "TEXT",
-    "ancla_origen": "TEXT",
-    "source_table": "TEXT",
+    "entidad_interna_id": "TEXT NOT NULL DEFAULT ''",
+    "propiedad_origen": "TEXT NOT NULL DEFAULT ''",
+    "valor_original": "TEXT",
+    "valor_limpio": "TEXT",
+    "firma_auditoria": "TEXT NOT NULL DEFAULT ''",
+    "tipo_dato_generico": "TEXT",
+    "tabla_origen": "TEXT",
     "job_id": "TEXT",
     "desde": "TIMESTAMPTZ NOT NULL DEFAULT NOW()",
     "hasta": "TIMESTAMPTZ",
@@ -37,9 +35,9 @@ def _quote_ident(name: str) -> str:
     return f'"{name}"'
 
 
-def compute_firma_valor(valor: Any) -> str:
-    """Hash SHA-256 del valor canónico para idempotencia (D11)."""
-    payload = canonical_string(valor).encode("utf-8")
+def compute_firma_auditoria(valor_limpio: Any) -> str:
+    """Hash SHA-256 del valor_limpio para trazabilidad SCD2."""
+    payload = canonical_string(valor_limpio).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -77,7 +75,7 @@ def _ensure_boveda_columns(schema_name: str) -> None:
 
 
 def ensure_boveda_table(schema_name: str) -> None:
-    """Crea o alinea a_3_boveda_kv con columnas SCD2 obligatorias."""
+    """Crea o alinea a_3_boveda_kv con columnas RMS v1.4."""
     engine = get_db_engine()
     inspector = inspect(engine)
     if inspector.has_table(BOVEDA_TABLE, schema=schema_name):
@@ -88,14 +86,13 @@ def ensure_boveda_table(schema_name: str) -> None:
     ddl = f"""
     CREATE TABLE IF NOT EXISTS {qualified} (
         id BIGSERIAL PRIMARY KEY,
-        clave_cotejo TEXT NOT NULL,
-        propiedad TEXT NOT NULL,
-        valor TEXT,
-        firma_valor TEXT NOT NULL,
-        traduccion_canonica JSONB,
-        rol TEXT,
-        ancla_origen TEXT,
-        source_table TEXT,
+        entidad_interna_id TEXT NOT NULL,
+        propiedad_origen TEXT NOT NULL,
+        valor_original TEXT,
+        valor_limpio TEXT,
+        firma_auditoria TEXT NOT NULL,
+        tipo_dato_generico TEXT,
+        tabla_origen TEXT,
         job_id TEXT,
         desde TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         hasta TIMESTAMPTZ
@@ -103,19 +100,13 @@ def ensure_boveda_table(schema_name: str) -> None:
     """
     index_activo = f"""
     CREATE INDEX IF NOT EXISTS idx_{BOVEDA_TABLE}_activo
-    ON {qualified} (clave_cotejo, propiedad)
+    ON {qualified} (entidad_interna_id, propiedad_origen)
     WHERE hasta IS NULL
-    """
-    index_ancla = f"""
-    CREATE INDEX IF NOT EXISTS idx_{BOVEDA_TABLE}_ancla_activo
-    ON {qualified} (ancla_origen, propiedad)
-    WHERE hasta IS NULL AND ancla_origen IS NOT NULL
     """
 
     with engine.begin() as conn:
         conn.execute(text(ddl))
         conn.execute(text(index_activo))
-        conn.execute(text(index_ancla))
 
     logger.info("🛠️ [CATALYST] Tabla bóveda creada: %s.%s", schema_name, BOVEDA_TABLE)
 
@@ -123,69 +114,54 @@ def ensure_boveda_table(schema_name: str) -> None:
 def upsert_boveda_record(
     schema_name: str,
     *,
-    clave_cotejo: str,
-    propiedad: str,
-    valor: Any,
-    firma_valor: str,
-    traduccion_canonica: dict[str, Any] | None,
-    rol: str,
-    ancla_origen: str | None,
-    source_table: str,
+    entidad_interna_id: str,
+    propiedad_origen: str,
+    valor_original: str,
+    valor_limpio: str,
+    firma_auditoria: str,
+    tipo_dato_generico: str,
+    tabla_origen: str,
     job_id: str,
     summary: JobSummary,
-    use_ancla_lookup: bool,
 ) -> None:
-    """SCD2: cierra registro activo si cambió firma_valor; inserta si es nuevo o cambió."""
+    """SCD2 inmutable: cierra versión anterior si cambió firma_auditoria."""
     engine = get_db_engine()
     qualified = f"{_quote_ident(schema_name)}.{_quote_ident(BOVEDA_TABLE)}"
-    valor_text = canonical_string(valor)
-    traduccion_json = json.dumps(traduccion_canonica) if traduccion_canonica else None
     now = datetime.now(timezone.utc)
 
-    if use_ancla_lookup:
-        if not ancla_origen:
-            raise ValueError("ancla_origen es requerida para búsqueda SCD2 por ancla.")
-        select_sql = text(
-            f"SELECT firma_valor FROM {qualified} "
-            "WHERE ancla_origen = :ancla_origen AND propiedad = :propiedad AND hasta IS NULL "
-            "LIMIT 1"
-        )
-        lookup_params = {"ancla_origen": ancla_origen, "propiedad": propiedad}
-        close_sql = text(
-            f"UPDATE {qualified} SET hasta = :hasta "
-            "WHERE ancla_origen = :ancla_origen AND propiedad = :propiedad AND hasta IS NULL"
-        )
-    else:
-        select_sql = text(
-            f"SELECT firma_valor FROM {qualified} "
-            "WHERE clave_cotejo = :clave_cotejo AND propiedad = :propiedad AND hasta IS NULL "
-            "LIMIT 1"
-        )
-        lookup_params = {"clave_cotejo": clave_cotejo, "propiedad": propiedad}
-        close_sql = text(
-            f"UPDATE {qualified} SET hasta = :hasta "
-            "WHERE clave_cotejo = :clave_cotejo AND propiedad = :propiedad AND hasta IS NULL"
-        )
-
+    select_sql = text(
+        f"SELECT firma_auditoria FROM {qualified} "
+        "WHERE entidad_interna_id = :entidad_interna_id "
+        "AND propiedad_origen = :propiedad_origen AND hasta IS NULL "
+        "LIMIT 1"
+    )
+    close_sql = text(
+        f"UPDATE {qualified} SET hasta = :hasta "
+        "WHERE entidad_interna_id = :entidad_interna_id "
+        "AND propiedad_origen = :propiedad_origen AND hasta IS NULL"
+    )
     insert_sql = text(
         f"INSERT INTO {qualified} "
-        "(clave_cotejo, propiedad, valor, firma_valor, traduccion_canonica, rol, "
-        "ancla_origen, source_table, job_id, desde) "
-        "VALUES (:clave_cotejo, :propiedad, :valor, :firma_valor, "
-        "CAST(:traduccion_canonica AS JSONB), :rol, :ancla_origen, :source_table, "
-        ":job_id, :desde)"
+        "(entidad_interna_id, propiedad_origen, valor_original, valor_limpio, "
+        "firma_auditoria, tipo_dato_generico, tabla_origen, job_id, desde, hasta) "
+        "VALUES (:entidad_interna_id, :propiedad_origen, :valor_original, :valor_limpio, "
+        ":firma_auditoria, :tipo_dato_generico, :tabla_origen, :job_id, :desde, NULL)"
     )
+
+    lookup_params = {
+        "entidad_interna_id": entidad_interna_id,
+        "propiedad_origen": propiedad_origen,
+    }
 
     with engine.begin() as conn:
         current = conn.execute(select_sql, lookup_params).mappings().first()
 
-        if current and current["firma_valor"] == firma_valor:
+        if current and current["firma_auditoria"] == firma_auditoria:
             summary.registros_sin_cambio += 1
             return
 
-        close_params = {**lookup_params, "hasta": now}
         if current:
-            conn.execute(close_sql, close_params)
+            conn.execute(close_sql, {**lookup_params, "hasta": now})
             summary.registros_actualizados += 1
         else:
             summary.registros_insertados += 1
@@ -193,14 +169,13 @@ def upsert_boveda_record(
         conn.execute(
             insert_sql,
             {
-                "clave_cotejo": clave_cotejo,
-                "propiedad": propiedad,
-                "valor": valor_text,
-                "firma_valor": firma_valor,
-                "traduccion_canonica": traduccion_json,
-                "rol": rol,
-                "ancla_origen": ancla_origen,
-                "source_table": source_table,
+                "entidad_interna_id": entidad_interna_id,
+                "propiedad_origen": propiedad_origen,
+                "valor_original": valor_original,
+                "valor_limpio": valor_limpio,
+                "firma_auditoria": firma_auditoria,
+                "tipo_dato_generico": tipo_dato_generico,
+                "tabla_origen": tabla_origen,
                 "job_id": job_id,
                 "desde": now,
             },
