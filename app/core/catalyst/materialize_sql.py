@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import logging
+
 from app.core.catalyst.boveda_states import ESTADO_VIGENTE
 from app.core.catalyst.models import ConfigRow
 from app.core.catalyst.sql_types import tipo_dato_to_pg_type
 from app.core.catalyst.table_contract import qualified_table
+
+logger = logging.getLogger(__name__)
 
 
 def _sql_literal(value: str) -> str:
@@ -24,6 +28,45 @@ def derive_materialize_table_name(source_table: str) -> str:
     return f"a_4_{source_table}"
 
 
+def _dedupe_property_columns(config_rows: list[ConfigRow]) -> list[ConfigRow]:
+    """Conserva la primera ocurrencia de cada propiedad y advierte duplicados."""
+    seen: set[str] = set()
+    unique_rows: list[ConfigRow] = []
+
+    for row in config_rows:
+        if not row.guardar or not row.columna_origen:
+            continue
+        if row.columna_origen in seen:
+            logger.warning(
+                "⚠️ [MATERIALIZE] Propiedad duplicada en configuración ignorada: %s",
+                row.columna_origen,
+            )
+            continue
+        seen.add(row.columna_origen)
+        unique_rows.append(row)
+
+    return unique_rows
+
+
+def _build_pivot_expression(columna_origen: str, tipo_dato_generico: str) -> str:
+    """Construye expresión pivot con cast seguro para columnas numéricas."""
+    quoted_col = _quote_ident(columna_origen)
+    pg_type = tipo_dato_to_pg_type(tipo_dato_generico)
+    inner_expr = (
+        f"MAX(CASE WHEN propiedad_origen = {_sql_literal(columna_origen)} "
+        "THEN valor_limpio END)"
+    )
+
+    if pg_type == "TEXT":
+        return f"{inner_expr} AS {quoted_col}"
+
+    safe_cast = (
+        f"CASE WHEN NULLIF({inner_expr}, '') IS NULL "
+        f"THEN NULL ELSE NULLIF({inner_expr}, '')::{pg_type} END"
+    )
+    return f"{safe_cast} AS {quoted_col}"
+
+
 def build_pivot_select_sql(
     schema_name: str,
     boveda_table: str,
@@ -33,21 +76,12 @@ def build_pivot_select_sql(
 ) -> str:
     """SELECT con pivot condicional desde bóveda VIGENTE."""
     qualified_boveda = qualified_table(schema_name, boveda_table)
-    property_columns = [
-        row for row in config_rows if row.guardar and row.columna_origen
-    ]
+    property_columns = _dedupe_property_columns(config_rows)
 
-    pivot_exprs: list[str] = []
-    for row in property_columns:
-        quoted_col = _quote_ident(row.columna_origen)
-        pg_type = tipo_dato_to_pg_type(row.tipo_dato_generico)
-        case_expr = (
-            f"MAX(CASE WHEN propiedad_origen = {_sql_literal(row.columna_origen)} "
-            "THEN valor_limpio END)"
-        )
-        if pg_type != "TEXT":
-            case_expr = f"({case_expr})::{pg_type}"
-        pivot_exprs.append(f"{case_expr} AS {quoted_col}")
+    pivot_exprs = [
+        _build_pivot_expression(row.columna_origen, row.tipo_dato_generico)
+        for row in property_columns
+    ]
 
     select_columns = [
         "entidad_interna_id",

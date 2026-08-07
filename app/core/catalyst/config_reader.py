@@ -45,19 +45,22 @@ def load_config_rows(
             f"La tabla {schema_name}.{config_table} no expone columna_origen/propiedad."
         )
 
-    has_tabla_origen = _resolve_column_name(columns, "tabla_origen", "tablaOrigen") is not None
-    order_clause = f'ORDER BY {_quote_ident(columna_field)}'
-
-    if has_tabla_origen:
-        sql = text(
-            f"SELECT * FROM {qualified} "
-            "WHERE tabla_origen = :source_table "
-            f"{order_clause}"
+    tabla_filter_field = _resolve_column_name(
+        columns, "tabla", "tabla_origen", "tablaOrigen"
+    )
+    if not tabla_filter_field:
+        raise RuntimeError(
+            f"La tabla {schema_name}.{config_table} no expone columna tabla/tabla_origen "
+            "para filtrar por source_table."
         )
-        params = {"source_table": source_table}
-    else:
-        sql = text(f"SELECT * FROM {qualified} {order_clause}")
-        params = {}
+
+    order_clause = f'ORDER BY {_quote_ident(columna_field)}'
+    sql = text(
+        f"SELECT * FROM {qualified} "
+        f"WHERE {_quote_ident(tabla_filter_field)} = :source_table "
+        f"{order_clause}"
+    )
+    params = {"source_table": source_table}
 
     with engine.connect() as conn:
         rows = conn.execute(sql, params).mappings().all()

@@ -41,6 +41,7 @@ from app.core.catalyst.materialize_sql import (
     build_materialize_ddl,
     build_pivot_select_sql,
     derive_materialize_table_name,
+    _dedupe_property_columns,
 )
 from app.core.catalyst.sql_types import tipo_dato_to_pg_type
 from app.core.catalyst.models import ConfigRow
@@ -144,8 +145,118 @@ def test_build_pivot_select_sql_includes_identity_and_typed_columns() -> None:
     assert "actualizado_en" in sql
     assert '"nombre"' in sql
     assert '"superficie"' in sql
+    assert "NULLIF" in sql
     assert "::NUMERIC" in sql
     assert "ignorada" not in sql
+
+
+def test_build_pivot_select_sql_dedupes_duplicate_properties() -> None:
+    config_rows = [
+        ConfigRow(columna_origen="nombre", tipo_dato_generico="texto", es_llave=False, guardar=True),
+        ConfigRow(columna_origen="nombre", tipo_dato_generico="texto", es_llave=True, guardar=True),
+        ConfigRow(columna_origen="codigo", tipo_dato_generico="texto", es_llave=False, guardar=True),
+    ]
+    deduped = _dedupe_property_columns(config_rows)
+    sql = build_pivot_select_sql(
+        "s99998_dev",
+        "a_3_boveda_kv",
+        source_table="a_1_pma",
+        config_rows=config_rows,
+    )
+
+    assert len(deduped) == 2
+    assert sql.count('AS "nombre"') == 1
+    assert 'AS "codigo"' in sql
+
+
+def test_dedupe_property_columns_logs_warning_for_duplicates(caplog: pytest.LogCaptureFixture) -> None:
+    config_rows = [
+        ConfigRow(columna_origen="nombre", tipo_dato_generico="texto", es_llave=False, guardar=True),
+        ConfigRow(columna_origen="nombre", tipo_dato_generico="texto", es_llave=False, guardar=True),
+    ]
+
+    deduped = _dedupe_property_columns(config_rows)
+
+    assert len(deduped) == 1
+    assert any("duplicada" in record.message for record in caplog.records)
+
+
+def test_load_config_rows_filters_by_tabla_column(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.core.catalyst import config_reader
+
+    executed: dict[str, object] = {}
+
+    class FakeInspector:
+        def has_table(self, table: str, schema: str) -> bool:
+            return True
+
+        def get_columns(self, table: str, schema: str) -> list[dict[str, str]]:
+            return [
+                {"name": "tabla"},
+                {"name": "columna_origen"},
+                {"name": "tipo_dato_generico"},
+            ]
+
+    class FakeConnection:
+        def execute(self, sql: object, params: dict[str, object] | None = None) -> object:
+            executed["sql"] = str(sql)
+            executed["params"] = params
+
+            class Result:
+                def mappings(self) -> object:
+                    return self
+
+                def all(self) -> list[dict[str, object]]:
+                    return [
+                        {
+                            "columna_origen": "nombre",
+                            "tipo_dato_generico": "texto",
+                            "es_llave": False,
+                            "guardar": True,
+                        }
+                    ]
+
+            return Result()
+
+        def __enter__(self) -> FakeConnection:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    class FakeEngine:
+        def connect(self) -> FakeConnection:
+            return FakeConnection()
+
+    monkeypatch.setattr(config_reader, "get_db_engine", lambda: FakeEngine())
+    monkeypatch.setattr(config_reader, "inspect", lambda _engine: FakeInspector())
+
+    rows = config_reader.load_config_rows("s99998_dev", "a_1_pma", "a_2_config_ingesta_a")
+
+    assert len(rows) == 1
+    assert '"tabla" = :source_table' in str(executed["sql"])
+    assert executed["params"] == {"source_table": "a_1_pma"}
+
+
+def test_load_config_rows_requires_tabla_filter_column(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.core.catalyst import config_reader
+
+    class FakeInspector:
+        def has_table(self, table: str, schema: str) -> bool:
+            return True
+
+        def get_columns(self, table: str, schema: str) -> list[dict[str, str]]:
+            return [{"name": "columna_origen"}]
+
+    class FakeEngine:
+        def connect(self) -> object:
+            raise AssertionError("No debe consultar sin columna tabla")
+
+    monkeypatch.setattr(config_reader, "get_db_engine", lambda: FakeEngine())
+    monkeypatch.setattr(config_reader, "inspect", lambda _engine: FakeInspector())
+
+    with pytest.raises(RuntimeError, match="tabla/tabla_origen"):
+        config_reader.load_config_rows("s99998_dev", "a_1_pma", "a_2_config_ingesta_a")
 
 
 def test_build_materialize_ddl_is_idempotent_drop_create() -> None:
