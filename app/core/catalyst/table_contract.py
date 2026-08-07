@@ -14,7 +14,7 @@ _INDEX_SUFFIX_RE = re.compile(r"[^a-zA-Z0-9_]+")
 RMS_V14_ENV_DEFAULTS: dict[str, str] = {
     "CATALYST_CONFIG_TABLE": "a_2_config_ingesta_a",
     "CATALYST_BOVEDA_TABLE": "a_3_boveda_kv",
-    "CATALYST_IDENTIDAD_TABLE": "a_2_identidad",
+    "CATALYST_IDENTIDAD_TABLE": "a_3_identidad",
 }
 
 

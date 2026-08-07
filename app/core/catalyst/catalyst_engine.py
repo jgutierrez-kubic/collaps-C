@@ -1,4 +1,4 @@
-"""Orquestador principal del refiner Catalyst (RMS Genérico v1.4)."""
+"""Orquestador principal del refiner Catalyst (RMS Genérico v1.5)."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from app.core.analysis_engine import (
     _is_retryable_callback_error,
     _log_callback_retry,
 )
+from app.core.catalyst.origen_dato import ORIGEN_CARGA_MASIVA
 from app.core.catalyst.boveda_writer import (
     compute_firma_auditoria,
     ensure_boveda_table,
@@ -31,7 +32,12 @@ from app.core.catalyst.governance import (
     source_table_has_column,
 )
 from app.core.catalyst.identity import resolve_row_identity
-from app.core.catalyst.identity_writer import ensure_identidad_table, upsert_identidad
+from app.core.catalyst.identity_writer import (
+    ensure_identidad_table,
+    finalize_entity_lifecycle,
+    refresh_total_propiedades_activas,
+    upsert_identidad,
+)
 from app.core.catalyst.models import ConfigRow, JobSummary
 from app.core.config import DB_URL
 from app.core.db import get_db_engine
@@ -156,6 +162,7 @@ class CatalystEngine:
                 self.payload.schema_name,
                 self.tables.boveda_table,
                 entidad_interna_id=identity.entidad_interna_id,
+                llave_humana_completa=identity.llave_humana_completa,
                 propiedad_origen=config.columna_origen,
                 valor_original=valor_original,
                 valor_limpio=valor_limpio,
@@ -164,7 +171,16 @@ class CatalystEngine:
                 tabla_origen=self.payload.source_table,
                 job_id=job_id,
                 summary=self._summary,
+                origen_dato=ORIGEN_CARGA_MASIVA,
             )
+
+        refresh_total_propiedades_activas(
+            self.payload.schema_name,
+            self.tables.identidad_table,
+            self.tables.boveda_table,
+            entidad_interna_id=identity.entidad_interna_id,
+            tabla_origen=self.payload.source_table,
+        )
 
     @staticmethod
     @retry(
@@ -273,11 +289,20 @@ class CatalystEngine:
                         logger.error("❌ [CATALYST] %s", message, exc_info=True)
                         self._summary.errores.append(message)
 
+            finalize_entity_lifecycle(
+                self.payload.schema_name,
+                self.tables.identidad_table,
+                self.tables.boveda_table,
+                tabla_origen=self.payload.source_table,
+                job_id=job_id,
+                summary=self._summary,
+            )
+
             callback_status = "success"
             elapsed = time.perf_counter() - started_at
             logger.info(
                 "✅ [CATALYST DONE] %.2fs — job_id=%s, filas=%d, omitidas=%d, insertados=%d, "
-                "actualizados=%d, sin_cambio=%d, errores=%d",
+                "actualizados=%d, sin_cambio=%d, eliminados=%d, inactivas=%d, errores=%d",
                 elapsed,
                 job_id,
                 self._summary.filas_procesadas,
@@ -285,6 +310,8 @@ class CatalystEngine:
                 self._summary.registros_insertados,
                 self._summary.registros_actualizados,
                 self._summary.registros_sin_cambio,
+                self._summary.registros_eliminados,
+                self._summary.entidades_inactivadas,
                 len(self._summary.errores),
             )
         except Exception as exc:

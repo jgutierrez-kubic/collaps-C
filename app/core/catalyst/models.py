@@ -34,6 +34,60 @@ class ConfigRow:
 
 
 @dataclass
+class SyncBackSummary:
+    """Resumen de una operación sync-back (edición manual en bóveda)."""
+
+    registros_insertados: int = 0
+    registros_actualizados: int = 0
+    registros_sin_cambio: int = 0
+    errores: list[str] | None = None
+
+    def __post_init__(self) -> None:
+        if self.errores is None:
+            self.errores = []
+
+    def to_boveda_summary(self) -> JobSummary:
+        return JobSummary(
+            registros_insertados=self.registros_insertados,
+            registros_actualizados=self.registros_actualizados,
+            registros_sin_cambio=self.registros_sin_cambio,
+        )
+
+    def apply_boveda_summary(self, summary: JobSummary) -> None:
+        self.registros_insertados = summary.registros_insertados
+        self.registros_actualizados = summary.registros_actualizados
+        self.registros_sin_cambio = summary.registros_sin_cambio
+
+    def to_response_dict(self) -> dict[str, Any]:
+        return {
+            "registrosInsertados": self.registros_insertados,
+            "registrosActualizados": self.registros_actualizados,
+            "registrosSinCambio": self.registros_sin_cambio,
+            "errores": self.errores or [],
+        }
+
+
+@dataclass
+class MaterializeSummary:
+    """Resumen del job de materialización Capa 4."""
+
+    entidades_materializadas: int = 0
+    columnas_creadas: int = 0
+    errores: list[str] | None = None
+
+    def __post_init__(self) -> None:
+        if self.errores is None:
+            self.errores = []
+
+    def to_callback_dict(self) -> dict[str, Any]:
+        return {
+            "entidadesMaterializadas": self.entidades_materializadas,
+            "columnasCreadas": self.columnas_creadas,
+            "errores": self.errores or [],
+        }
+
+
+@dataclass
 class JobSummary:
     """Resumen acumulado del job Catalyst."""
 
@@ -42,6 +96,8 @@ class JobSummary:
     registros_insertados: int = 0
     registros_actualizados: int = 0
     registros_sin_cambio: int = 0
+    registros_eliminados: int = 0
+    entidades_inactivadas: int = 0
     errores: list[str] | None = None
 
     def __post_init__(self) -> None:
@@ -55,5 +111,7 @@ class JobSummary:
             "registrosInsertados": self.registros_insertados,
             "registrosActualizados": self.registros_actualizados,
             "registrosSinCambio": self.registros_sin_cambio,
+            "registrosEliminados": self.registros_eliminados,
+            "entidadesInactivadas": self.entidades_inactivadas,
             "errores": self.errores or [],
         }
